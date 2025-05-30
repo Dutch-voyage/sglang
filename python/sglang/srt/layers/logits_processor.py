@@ -69,6 +69,10 @@ class LogitsProcessorOutput:
     hidden_states: Optional[torch.Tensor] = None
 
     ## Part 2: This part will be assigned in python/sglang/srt/layers/sampler.py::Sampler
+    # NOTE: This part is extented to return the bin sampled logprobs and ids
+    bin_sample_id: Optional[torch.Tensor] = None
+    intra_bin_probs: Optional[torch.Tensor] = None
+    
     # The logprobs of the next tokens.                              shape: [#seq]
     next_token_logprobs: Optional[torch.Tensor] = None
     # The logprobs and ids of the top-k tokens in output positions. shape: [#seq, k]

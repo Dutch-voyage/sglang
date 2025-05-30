@@ -897,8 +897,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         enable_custom_logit_processor: bool,
         chunked_req: Optional[Req] = None,
     ):
+        enable_bin_sampling = any(req.enable_bin_sampling for req in reqs)
         return_logprob = any(req.return_logprob for req in reqs)
-
+        
         return cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
@@ -906,6 +907,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             tree_cache=tree_cache,
             model_config=model_config,
             enable_overlap=enable_overlap,
+            enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),

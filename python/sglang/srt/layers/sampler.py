@@ -132,7 +132,6 @@ class Sampler(nn.Module):
                 raise ValueError(
                     f"Invalid sampling backend: {global_server_args_dict['sampling_backend']}"
                 )
-        
         if enable_bin_sampling:
             (
                 logits_output.bin_sample_id,

@@ -221,6 +221,8 @@ class SamplingBatchInfo:
             "top_ps",
             "top_ks",
             "min_ps",
+            "bin_ks",
+            "normalized_deltas",
         ]:
             value = getattr(self, item, None)
             setattr(self, item, value[keep_indices_device])
@@ -316,6 +318,8 @@ class SamplingBatchInfo:
             "top_ps",
             "top_ks",
             "min_ps",
+            "bin_ks",
+            "normalized_deltas",
         ]:
             self_val = getattr(self, item, None)
             other_val = getattr(other, item, None)

@@ -12,14 +12,15 @@ def _get_bin_range(logits: torch.Tensor,
     logits_range = logits_sorted[:, 0] - logits_sorted[:, -1]
     M = (logits_range / deltas).max().ceil().long()
     bin_logits = torch.full((logits.shape[0], M), -float('inf'), device=logits.device)
-    bin_range = torch.full((logits.shape[0], M), float('inf'), device=logits.device)
+    bin_range = torch.full((logits.shape[0], M), -float('inf'), device=logits.device)
     bin_mask = torch.zeros((logits.shape[0], M), device=logits.device)
+
     for i in range(logits.shape[0]):
         bin_size = (logits_range[i] // deltas[i]).ceil().long()
         # bin_range[i, :bin_size] = torch.linspace(logits_sorted[i, -1] - epsilon, logits_sorted[i, 0], bin_size)
         bin_range[i, :bin_size] = -torch.linspace(- logits_sorted[i, 0], - logits_sorted[i, -1] + epsilon, bin_size)
         bin_mask[i, :bin_size - 1] = 1
-        bin_logits[i, :bin_size - 1] = (-torch.arange(bin_size - 1, device=logits.device)).flip(dims=[0]) * normalized_deltas[i] + logits_sorted[i, 0]
+        bin_logits[i, :bin_size - 1] = (-torch.arange(bin_size - 1, device=logits.device)) * normalized_deltas[i] + logits_sorted[i, 0]
         # bin_logits[i, :bin_size - 1] = (-torch.arange(bin_size - 1, device=logits.device)).flip(dims=[0]) * deltas[i] + logits_sorted[i, 0]
     intra_bin_probs = F.softmax(bin_logits, dim=-1)
     return bin_range, bin_mask, intra_bin_probs
@@ -41,7 +42,7 @@ def _get_bin_logprobs_torch(logits,
     
     _, M = bin_range.shape
     
-    # right = False means bin_ssignments[j] = i if  bin_range[i - 1] < logits[j] <= bin_range[i]
+    # right = False means bin_assignments[j] = i if  bin_range[i - 1] < logits[j] <= bin_range[i]
     bin_assignments = torch.searchsorted(- bin_range, - logits, right=False).long() - 1
 
     mask_m = bin_assignments[:, None, :] == torch.arange(M, device=logits.device)[None, :, None] # [N, M, V]

@@ -180,7 +180,7 @@ class SchedulerOutputProcessorMixin:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
 
-        self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
+        self.stream_output(batch.reqs, batch.return_logprob, batch.enable_bin_sampling, skip_stream_req)
 
     def process_batch_result_decode(
         self: Scheduler,
@@ -271,7 +271,7 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.set_next_batch_sampling_info_done(batch)
-        self.stream_output(batch.reqs, batch.return_logprob)
+        self.stream_output(batch.reqs, batch.return_logprob, batch.enable_bin_sampling)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
