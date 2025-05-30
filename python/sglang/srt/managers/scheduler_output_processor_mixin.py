@@ -237,6 +237,10 @@ class SchedulerOutputProcessorMixin:
             if req.finished():
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
+                
+            if req.enable_bin_sampling:
+                req.bin_sample_id.append(logits_output.bin_sample_id[i].cpu().clone().tolist())
+                req.intra_bin_probs.append(logits_output.intra_bin_probs[i].cpu().clone().tolist())
 
             if req.return_logprob and batch.spec_algorithm.is_none():
                 # speculative worker handles logprob in speculative decoding
@@ -446,11 +450,12 @@ class SchedulerOutputProcessorMixin:
         self: Scheduler,
         reqs: List[Req],
         return_logprob: bool,
+        enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
     ):
         """Stream the output to detokenizer."""
         if self.is_generation:
-            self.stream_output_generation(reqs, return_logprob, skip_req)
+            self.stream_output_generation(reqs, return_logprob, enable_bin_sampling, skip_req)
         else:  # embedding or reward model
             self.stream_output_embedding(reqs)
 
@@ -458,6 +463,7 @@ class SchedulerOutputProcessorMixin:
         self: Scheduler,
         reqs: List[Req],
         return_logprob: bool,
+        enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
     ):
         rids = []
@@ -476,6 +482,12 @@ class SchedulerOutputProcessorMixin:
         cached_tokens = []
         spec_verify_ct = []
         output_hidden_states = None
+        
+        if enable_bin_sampling:
+            bin_sample_id = []
+            intra_bin_probs = []
+        else:
+            bin_sample_id = intra_bin_probs = None
 
         if return_logprob:
             input_token_logprobs_val = []
@@ -561,6 +573,10 @@ class SchedulerOutputProcessorMixin:
 
                 if not self.spec_algorithm.is_none():
                     spec_verify_ct.append(req.spec_verify_ct)
+                    
+                if enable_bin_sampling:
+                    bin_sample_id.append(req.bin_sample_id)
+                    intra_bin_probs.append(req.intra_bin_probs)
 
                 if return_logprob:
                     if (
@@ -662,6 +678,8 @@ class SchedulerOutputProcessorMixin:
                     completion_tokens,
                     cached_tokens,
                     spec_verify_ct,
+                    bin_sample_id,
+                    intra_bin_probs,
                     input_token_logprobs_val,
                     input_token_logprobs_idx,
                     output_token_logprobs_val,

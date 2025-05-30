@@ -1251,6 +1251,7 @@ class ModelRunner:
         next_token_ids = self.sampler(
             logits_output,
             forward_batch.sampling_info,
+            forward_batch.enable_bin_sampling,
             forward_batch.return_logprob,
             forward_batch.top_logprobs_nums,
             forward_batch.token_ids_logprobs,

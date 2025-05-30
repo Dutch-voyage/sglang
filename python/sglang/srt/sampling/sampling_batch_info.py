@@ -24,6 +24,10 @@ class SamplingBatchInfo:
     top_ks: torch.Tensor
     min_ps: torch.Tensor
 
+    # NOTE: added for bin sampling
+    bin_ks: torch.Tensor
+    normalized_deltas: torch.Tensor
+    
     # Whether all requests use greedy sampling
     is_all_greedy: bool
 
@@ -75,6 +79,14 @@ class SamplingBatchInfo:
         ).to(device, non_blocking=True)
         min_ps = torch.tensor(
             [r.sampling_params.min_p for r in reqs], dtype=torch.float
+        ).to(device, non_blocking=True)
+        
+        # NOTE: added for bin sampling
+        bin_ks = torch.tensor(
+            [r.sampling_params.bin_k for r in reqs], dtype=torch.int64
+        ).to(device, non_blocking=True)
+        normalized_deltas = torch.tensor(
+            [r.sampling_params.normalized_delta for r in reqs], dtype=torch.float
         ).to(device, non_blocking=True)
 
         # Check if any request has custom logit processor
@@ -132,6 +144,8 @@ class SamplingBatchInfo:
             top_ps=top_ps,
             top_ks=top_ks,
             min_ps=min_ps,
+            bin_ks=bin_ks,
+            normalized_deltas=normalized_deltas,
             is_all_greedy=all(r.sampling_params.top_k <= 1 for r in reqs),
             need_min_p_sampling=any(r.sampling_params.min_p > 0 for r in reqs),
             vocab_size=vocab_size,

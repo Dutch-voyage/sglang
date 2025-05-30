@@ -11,6 +11,8 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import crash_on_warnings, get_bool_env_var, is_cuda
+from sglang.srt.custom.bin_sample import _get_bin_logprobs_torch
+
 
 if is_cuda():
     from sgl_kernel import (
@@ -39,6 +41,7 @@ class Sampler(nn.Module):
         self,
         logits_output: LogitsProcessorOutput,
         sampling_info: SamplingBatchInfo,
+        enable_bin_sampling: bool,
         return_logprob: bool,
         top_logprobs_nums: List[int],
         token_ids_logprobs: List[List[int]],
@@ -129,7 +132,13 @@ class Sampler(nn.Module):
                 raise ValueError(
                     f"Invalid sampling backend: {global_server_args_dict['sampling_backend']}"
                 )
-
+        
+        if enable_bin_sampling:
+            (
+                logits_output.bin_sample_id,
+                logits_output.intra_bin_probs,
+            ) = get_bin_logprobs(logits, sampling_info.bin_ks, sampling_info.normalized_deltas)
+        
         # Attach logprobs to logits_output (in-place modification)
         if return_logprob:
             if any(x > 0 for x in top_logprobs_nums):
@@ -264,3 +273,17 @@ def get_token_ids_logprobs(logprobs: torch.Tensor, token_ids_logprobs: List[List
             output_token_ids_logprobs_idx.append([])
 
     return output_token_ids_logprobs_val, output_token_ids_logprobs_idx
+
+def get_bin_logprobs(logits: torch.Tensor, ks: torch.Tensor, normalized_deltas: torch.Tensor):
+    """
+        k: logits[0] - logits[k - 1] determines the size of the first bin, which is the same for all bins.
+        normalized_delta: the normalized delta between bins.
+        
+        delta = logits[0] - logits[k - 1]
+        the original logits will look like: [logits_0, logits_0 - delta, logits_0 - 2 * delta, ...]
+        after normalization, the logits will look like: [logits_0, logits_0 - normalized_delta, logits_0 - 2 * normalized_delta, ...]
+        
+        so the log probability of the orignal bin-wise sampling will be compressed by a factor of delta / normalized_delta.
+    """
+    bin_sample_id, intra_bin_probs = _get_bin_logprobs_torch(logits, ks, normalized_deltas)
+    return bin_sample_id, intra_bin_probs

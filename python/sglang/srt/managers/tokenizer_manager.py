@@ -516,6 +516,7 @@ class TokenizerManager:
 
         if self.is_generation:
             return_logprob = obj.return_logprob
+            enable_bin_sampling = obj.enable_bin_sampling
             logprob_start_len = obj.logprob_start_len
             top_logprobs_num = obj.top_logprobs_num
             token_ids_logprob = obj.token_ids_logprob
@@ -545,16 +546,17 @@ class TokenizerManager:
         # Build return object
         if isinstance(obj, GenerateReqInput):
             tokenized_obj = TokenizedGenerateReqInput(
-                obj.rid,
-                input_text,
-                input_ids,
-                image_inputs,
-                sampling_params,
-                return_logprob,
-                logprob_start_len,
-                top_logprobs_num,
-                token_ids_logprob,
-                obj.stream,
+                rid=obj.rid,
+                input_text=input_text,
+                input_ids=input_ids,
+                mm_inputs=image_inputs,
+                sampling_params=sampling_params,
+                return_logprob=return_logprob,
+                enable_bin_sampling=enable_bin_sampling,
+                logprob_start_len=logprob_start_len,
+                top_logprobs_num=top_logprobs_num,
+                token_ids_logprob=token_ids_logprob,
+                stream=obj.stream,
                 bootstrap_host=obj.bootstrap_host,
                 bootstrap_port=obj.bootstrap_port,
                 bootstrap_room=obj.bootstrap_room,
@@ -1136,7 +1138,15 @@ class TokenizerManager:
                 "finish_reason": recv_obj.finished_reasons[i],
                 "prompt_tokens": recv_obj.prompt_tokens[i],
             }
-
+            
+            if getattr(state.obj, "enable_bin_sampling", False):
+                self.convert_bin_sampling_style(
+                    meta_info,
+                    state.obj.return_text_in_logprobs,
+                    recv_obj,
+                    i,
+                )
+                
             if getattr(state.obj, "return_logprob", False):
                 self.convert_logprob_style(
                     meta_info,
@@ -1213,6 +1223,19 @@ class TokenizerManager:
                 self.collect_metrics(state, recv_obj, i)
             if self.dump_requests_folder and state.finished and state.obj.log_metrics:
                 self.dump_requests(state, out_dict)
+    
+    def convert_bin_sampling_style(
+        self,
+        meta_info: dict,
+        return_text_in_logprobs: bool,
+        recv_obj: BatchStrOut,
+        recv_obj_index: int,
+    ):
+        meta_info["bin_token_logprobs"] = self.detokenize_bin_sampling_tokens(
+            recv_obj.bin_sample_id[recv_obj_index],
+            recv_obj.intra_bin_probs[recv_obj_index],
+            return_text_in_logprobs,
+        )
 
     def convert_logprob_style(
         self,
@@ -1299,6 +1322,24 @@ class TokenizerManager:
                     return_text_in_logprobs,
                 )
             )
+    
+    def detokenize_bin_sampling_tokens(
+        self,
+        bin_sample_id: List[int],
+        intra_bin_probs: List[float],
+        decode_to_text: bool,
+    ):
+        ret = []
+        for i in range(len(bin_sample_id)):
+            if bin_sample_id[i] != -1:
+                ret.append(
+                    self.detokenize_logprob_tokens(
+                        intra_bin_probs[i], bin_sample_id[i], decode_to_text
+                    )
+                )
+            else:
+                ret.append(None)
+        return ret
 
     def detokenize_logprob_tokens(
         self,

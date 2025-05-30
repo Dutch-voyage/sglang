@@ -156,6 +156,7 @@ class Engine(EngineBase):
                 ImageDataItem,
             ]
         ] = None,
+        enable_bin_sampling: Optional[Union[List[bool], bool]] = False,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
@@ -177,6 +178,7 @@ class Engine(EngineBase):
             input_ids=input_ids,
             sampling_params=sampling_params,
             image_data=image_data,
+            enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,
@@ -227,6 +229,7 @@ class Engine(EngineBase):
                 ImageDataItem,
             ]
         ] = None,
+        enable_bin_sampling: Optional[Union[List[bool], bool]] = False,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
@@ -247,6 +250,7 @@ class Engine(EngineBase):
             input_ids=input_ids,
             sampling_params=sampling_params,
             image_data=image_data,
+            enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,

@@ -69,6 +69,8 @@ class GenerateReqInput:
     sampling_params: Optional[Union[List[Dict], Dict]] = None
     # The request id.
     rid: Optional[Union[List[str], str]] = None
+    # Whether to enable bin sampling
+    enable_bin_sampling: Optional[Union[List[bool], bool]] = None
     # Whether to return logprobs.
     return_logprob: Optional[Union[List[bool], bool]] = None
     # If return logprobs, the start location in the prompt for returning logprobs.
@@ -203,6 +205,8 @@ class GenerateReqInput:
             self.sampling_params = {}
         if self.rid is None:
             self.rid = uuid.uuid4().hex
+        if self.enable_bin_sampling is None:
+            self.enable_bin_sampling = False
         if self.return_logprob is None:
             self.return_logprob = False
         if self.logprob_start_len is None:
@@ -229,6 +233,7 @@ class GenerateReqInput:
         self._normalize_sampling_params(num)
         self._normalize_rid(num)
         self._normalize_logprob_params(num)
+        self._normalize_enable_bin_sampling(num)
         self._normalize_custom_logit_processor(num)
 
     def _expand_inputs(self, num):
@@ -319,6 +324,24 @@ class GenerateReqInput:
         elif not isinstance(self.rid, list):
             raise ValueError("The rid should be a list for batch processing.")
 
+    def _normalize_enable_bin_sampling(self, num):
+        """Normalize enable_bin_sampling for batch processing."""
+        # Helper function to normalize a parameter
+        def normalize_param(param, default_value, param_name):
+            if param is None:
+                return [default_value] * num
+            elif not isinstance(param, list):
+                return [param] * num
+            else:
+                if self.parallel_sample_num > 1:
+                    raise ValueError(
+                        f"Cannot use list {param_name} with parallel_sample_num > 1"
+                    )
+                return param
+        self.enable_bin_sampling = normalize_param(
+            self.enable_bin_sampling, False, "enable_bin_sampling"
+        )
+
     def _normalize_logprob_params(self, num):
         """Normalize logprob-related parameters for batch processing."""
 
@@ -390,6 +413,7 @@ class GenerateReqInput:
             input_ids=self.input_ids[i] if self.input_ids is not None else None,
             image_data=self.image_data[i],
             audio_data=self.audio_data[i],
+            enable_bin_sampling=self.enable_bin_sampling[i],
             sampling_params=self.sampling_params[i],
             rid=self.rid[i],
             return_logprob=self.return_logprob[i],
@@ -432,6 +456,8 @@ class TokenizedGenerateReqInput:
     mm_inputs: dict
     # The sampling parameters
     sampling_params: SamplingParams
+    # Whether to enable bin sampling
+    enable_bin_sampling: bool
     # Whether to return the logprobs
     return_logprob: bool
     # If return logprobs, the start location in the prompt for returning logprobs.
@@ -596,6 +622,10 @@ class BatchTokenIDOut:
     completion_tokens: List[int]
     cached_tokens: List[int]
     spec_verify_ct: List[int]
+    
+    # For bin sampling
+    bin_sample_id: Optional[List[int]]
+    intra_bin_probs: Optional[List[float]]
 
     # Logprobs
     input_token_logprobs_val: List[float]
@@ -643,6 +673,10 @@ class BatchStrOut:
     completion_tokens: List[int]
     cached_tokens: List[int]
     spec_verify_ct: List[int]
+
+    # For bin sampling
+    bin_sample_id: Optional[List[int]]
+    intra_bin_probs: Optional[List[float]]
 
     # Logprobs
     input_token_logprobs_val: List[float]

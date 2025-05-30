@@ -156,6 +156,9 @@ class ForwardBatch:
 
     # Optional seq_lens on cpu
     seq_lens_cpu: Optional[torch.Tensor] = None
+    
+    # NOTE: added for bin sampling
+    enable_bin_sampling: bool = False
 
     # For logprob
     return_logprob: bool = False
@@ -277,6 +280,7 @@ class ForwardBatch:
             encoder_lens_cpu=batch.encoder_lens_cpu,
             encoder_out_cache_loc=batch.encoder_out_cache_loc,
             seq_lens_sum=batch.seq_lens_sum,
+            enable_bin_sampling=batch.enable_bin_sampling,
             return_logprob=batch.return_logprob,
             top_logprobs_nums=batch.top_logprobs_nums,
             token_ids_logprobs=batch.token_ids_logprobs,
