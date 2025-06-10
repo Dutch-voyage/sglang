@@ -12,7 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 """Sampling parameters for text generation."""
-
+import torch
 from typing import Any, Dict, List, Optional, Union
 
 _SAMPLING_EPS = 1e-6
@@ -36,6 +36,13 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        # ==========
+        # begin of soft thinking
+        # ==========
+        think_end_str: Optional[str] = None,
+        # ==========
+        # end of soft thinking
+        # ==========
         bin_k: int = 5,
         normalized_delta: float = 1.0,
         frequency_penalty: float = 0.0,
@@ -64,6 +71,16 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        self.soft_thinking_mode = None
+        self.think_end_str = think_end_str
+        # ==========
+        # end of soft thinking
+        # ==========
+        
         self.bin_k = bin_k
         self.normalized_delta = normalized_delta
         self.frequency_penalty = frequency_penalty
@@ -157,3 +174,7 @@ class SamplingParams:
                 else:
                     stop_str_max_len = max(stop_str_max_len, len(stop_str))
             self.stop_str_max_len = stop_str_max_len
+
+    def post_init_soft_thinking_mode(self):
+        # TODO: 换成cpu的，然后init的时候再传输，topk也是一样，会造成主卡显存不足
+        self.soft_thinking_mode = torch.tensor(True, dtype=torch.bool, device='cuda') 

@@ -300,7 +300,17 @@ class Qwen2Model(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
-            if input_embeds is None:
+            # ==========
+            # begin of soft thinking
+            # ==========
+            if forward_batch.topk_probs is not None and forward_batch.topk_indices is not None:
+                assert get_tensor_model_parallel_world_size() == 1, "Soft thinking is not supported when tp_size > 1."
+                hidden_states = self.embed_tokens.weighted_forward(
+                    forward_batch.topk_probs, forward_batch.topk_indices
+                )              # ==========
+            # end of soft thinking
+            # ==========
+            elif input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
             else:
                 hidden_states = input_embeds

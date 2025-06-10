@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-
+import time
 # @torch.compile
 def _get_bin_range(logits: torch.Tensor, 
                   ks: torch.Tensor, 

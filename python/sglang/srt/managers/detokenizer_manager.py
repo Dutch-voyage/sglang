@@ -223,6 +223,8 @@ class DetokenizerManager:
             spec_verify_ct=recv_obj.spec_verify_ct,
             bin_sample_id=recv_obj.bin_sample_id,
             intra_bin_probs=recv_obj.intra_bin_probs,
+            entropy=recv_obj.entropy,
+            varentropy=recv_obj.varentropy,
             input_token_logprobs_val=recv_obj.input_token_logprobs_val,
             input_token_logprobs_idx=recv_obj.input_token_logprobs_idx,
             output_token_logprobs_val=recv_obj.output_token_logprobs_val,
@@ -236,6 +238,14 @@ class DetokenizerManager:
             output_token_ids_logprobs_val=recv_obj.output_token_ids_logprobs_val,
             output_token_ids_logprobs_idx=recv_obj.output_token_ids_logprobs_idx,
             output_hidden_states=recv_obj.output_hidden_states,
+            # ==========
+            # begin of soft thinking
+            # ==========
+            output_topk_probs_list=recv_obj.output_topk_probs_list,
+            output_topk_indices_list=recv_obj.output_topk_indices_list,
+            # ==========
+            # end of soft thinking
+            # ==========
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):

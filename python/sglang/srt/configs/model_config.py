@@ -53,6 +53,14 @@ class ModelConfig:
         quantization: Optional[str] = None,
         override_config_file: Optional[str] = None,
         is_draft_model: bool = False,
+        # ==========
+        # begin of soft thinking
+        # ==========
+        enable_soft_thinking: Optional[bool] = None,
+        max_topk: Optional[int] = None,
+        # ==========
+        # end of soft thinking
+        # ==========
     ) -> None:
 
         self.model_path = model_path
@@ -227,6 +235,15 @@ class ModelConfig:
         self.image_token_id = getattr(config, "image_token_id", None) or getattr(
             config, "image_token_index", None
         )
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        self.enable_soft_thinking = enable_soft_thinking
+        self.max_topk = max_topk
+        # ==========
+        # end of soft thinking
+        # ==========
 
     @staticmethod
     def from_server_args(server_args: ServerArgs, model_path: str = None, **kwargs):
@@ -240,6 +257,14 @@ class ModelConfig:
             enable_multimodal=server_args.enable_multimodal,
             dtype=server_args.dtype,
             quantization=server_args.quantization,
+            # ==========
+            # begin of soft thinking
+            # ==========
+            enable_soft_thinking = server_args.enable_soft_thinking,
+            max_topk = server_args.max_topk,
+            # ==========
+            # end of soft thinking
+            # ==========
             **kwargs,
         )
 

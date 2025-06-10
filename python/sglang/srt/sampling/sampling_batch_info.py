@@ -24,10 +24,6 @@ class SamplingBatchInfo:
     top_ks: torch.Tensor
     min_ps: torch.Tensor
 
-    # NOTE: added for bin sampling
-    bin_ks: torch.Tensor
-    normalized_deltas: torch.Tensor
-    
     # Whether all requests use greedy sampling
     is_all_greedy: bool
 
@@ -58,6 +54,15 @@ class SamplingBatchInfo:
 
     # Device
     device: str = "cuda"
+    
+    # NOTE: added for bin sampling
+    bin_ks: torch.Tensor = None
+    normalized_deltas: torch.Tensor = None
+    
+    # NOTE: added for soft thinking
+    enable_soft_thinking: bool = False
+    soft_thinking_modes: Optional[torch.Tensor] = None
+    max_topk: Optional[int] = None
 
     @classmethod
     def from_schedule_batch(cls, batch: ScheduleBatch, vocab_size: int):
@@ -138,12 +143,35 @@ class SamplingBatchInfo:
                 penaltylib.BatchedPresencePenalizer,
             },
         )
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        enable_soft_thinking = batch.enable_soft_thinking
+        if enable_soft_thinking:
+            soft_thinking_modes = torch.tensor([req.sampling_params.soft_thinking_mode for req in reqs], dtype=torch.bool).to(device, non_blocking=True)
+            max_topk = batch.max_topk
+        else:
+            soft_thinking_modes = None
+            max_topk = None
+        # ==========
+        # end of soft thinking
+        # ==========
 
         ret = cls(
             temperatures=temperatures,
             top_ps=top_ps,
             top_ks=top_ks,
             min_ps=min_ps,
+            # ==========
+            # begin of soft thinking
+            # ==========
+            enable_soft_thinking=batch.enable_soft_thinking,
+            soft_thinking_modes=soft_thinking_modes,
+            max_topk=max_topk,
+            # ==========
+            # end of soft thinking
+            # ==========
             bin_ks=bin_ks,
             normalized_deltas=normalized_deltas,
             is_all_greedy=all(r.sampling_params.top_k <= 1 for r in reqs),

@@ -32,6 +32,7 @@ TODO(lmzheng): ModelWorkerBatch seems a bit redundant and we consider removing i
 """
 
 import copy
+import uuid
 import dataclasses
 import hashlib
 import logging
@@ -427,6 +428,15 @@ class Req:
         origin_input_ids: Tuple[int],
         sampling_params: SamplingParams,
         enable_bin_sampling: bool = False,
+        return_entropy: bool = False,
+        # ==========
+        # begin of soft thinking
+        # ==========
+        enable_soft_thinking: bool = False,
+        max_topk: Optional[int] = None,
+        # ==========
+        # end of soft thinking
+        # ==========
         return_logprob: bool = False,
         top_logprobs_num: int = 0,
         token_ids_logprob: List[int] = None,
@@ -527,9 +537,14 @@ class Req:
         self.send_output_token_logprobs_offset: int = 0
 
         self.enable_bin_sampling = enable_bin_sampling
+        self.return_entropy = return_entropy
         if enable_bin_sampling:
             self.bin_sample_id = []
             self.intra_bin_probs = []
+        
+        if return_entropy:
+            self.entropy = []
+            self.varentropy = []
 
         # Logprobs (arguments)
         self.return_logprob = return_logprob
@@ -612,6 +627,35 @@ class Req:
         # We use `tmp_end_idx` to store the end index of the kv cache to send.
         self.tmp_end_idx: int = -1
         self.metadata_buffer_index: int = -1
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        self.enable_soft_thinking = enable_soft_thinking
+        if self.enable_soft_thinking:
+            self.sampling_params.post_init_soft_thinking_mode()
+            self.topk_prob = torch.empty(
+                max_topk,  # 注意：直接传尺寸数字，不要用元组
+                dtype=torch.bfloat16,
+                device=torch.device('cuda:0')  # 明确指定设备索引
+            ).fill_(float('nan'))
+
+            self.topk_idx = torch.full(
+                (max_topk,),  # full()可以接受元组
+                -1,
+                dtype=torch.int64,
+                device=torch.device('cuda:0')
+            )
+            # NOTE: 输入的部分暂时不进行保留。 shape: [output_len, K]
+            self.output_topk_prob_list = []
+            self.output_topk_idx_list = []
+            self.output_topk_prob_list_tmp = []
+            self.output_topk_idx_list_tmp = []
+            # track consecutive low entropy steps for early stopping
+            self.low_entropy_steps = 0
+        # ==========
+        # end of soft thinking
+        # ==========
 
     @property
     def seqlen(self):
@@ -737,6 +781,68 @@ class Req:
                 if stop_str in tail_str or stop_str in self.decoded_text:
                     self.finished_reason = FINISH_MATCHED_STR(matched=stop_str)
                     return
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    def update_topk_info(self, logits_output, index):
+        # 更新 topk 信息
+        self.topk_prob = logits_output.topk_probs[index]
+        self.topk_idx = logits_output.topk_indices[index]
+        self.entropy = logits_output.entropy[index]
+        # last_token_id = self.output_ids[-1]
+
+        if self.sampling_params.soft_thinking_mode:
+            if self.sampling_params.think_end_str_id is None:
+                self.sampling_params.think_end_str_id = self.tokenizer.encode(self.sampling_params.think_end_str,add_special_tokens=False)[-1]
+            # early stopping: replace with think_end_str_id if entropy remains low
+            if self.sampling_params.early_stopping_entropy_threshold > 0:
+                if self.entropy < self.sampling_params.early_stopping_entropy_threshold:
+                    self.low_entropy_steps += 1
+                else:
+                    self.low_entropy_steps = 0
+                if self.low_entropy_steps >= self.sampling_params.early_stopping_length_threshold:
+                    print(f"Early stopping triggered", flush=True)
+                    # trigger early stop, emit think_end_str token
+                    self.output_ids[-1] = self.sampling_params.think_end_str_id
+                    self.topk_prob[1:].fill_(0)
+                    self.topk_idx[1:].fill_(0)
+                    self.topk_prob[0] = 1.0
+                    self.topk_idx[0] = self.sampling_params.think_end_str_id
+
+            if self.sampling_params.think_end_str_id == self.output_ids[-1]:
+                # 退出 soft thinking 模式并将 topk 设置为 one-hot
+                self.sampling_params.soft_thinking_mode = False
+                # 一键清零再设置 head
+                self.topk_prob[1:].fill_(0)
+                self.topk_idx[1:].fill_(0)
+                self.topk_prob[0] = 1.0
+                self.topk_idx[0] = self.sampling_params.think_end_str_id
+        else:
+            # 普通模式下只需 in-place 清零 tail，head 保持 logits 输出
+            self.topk_prob[1:].fill_(0)
+            self.topk_idx[1:].fill_(0)
+            self.topk_prob[0] = 1.0
+
+        # 仅在未完成时记录 topk 信息
+        if not self.finished():
+            self.output_topk_prob_list_tmp.append(self.topk_prob)
+            self.output_topk_idx_list_tmp.append(self.topk_idx)
+
+    def get_output_topk_prob_list(self):
+        if self.output_topk_prob_list_tmp:
+            self.output_topk_prob_list.extend(torch.stack(self.output_topk_prob_list_tmp, dim=0).cpu().tolist())
+            self.output_topk_prob_list_tmp = []
+        return self.output_topk_prob_list
+
+    def get_output_topk_idx_list(self):
+        if self.output_topk_idx_list_tmp:
+            self.output_topk_idx_list.extend(torch.stack(self.output_topk_idx_list_tmp, dim=0).cpu().tolist())
+            self.output_topk_idx_list_tmp = []
+        return self.output_topk_idx_list
+    # ==========
+    # end of soft thinking
+    # ==========
 
     def reset_for_retract(self):
         self.prefix_indices = []
@@ -783,8 +889,6 @@ class Req:
             f"{self.grammar=}, "
             f"{self.sampling_params=})"
         )
-
-
 # Batch id
 bid = 0
 
@@ -840,6 +944,21 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # For bin sampling
     enable_bin_sampling: bool = False
+    
+    # For entropy
+    return_entropy: bool = False
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    # For soft thinking mode
+    enable_soft_thinking: bool = None
+    max_topk: Optional[int] = None
+    topk_probs: Optional[torch.Tensor] = None
+    topk_indices: Optional[torch.Tensor] = None
+    # ==========
+    # end of soft thinking
+    # ==========
 
     # For processing logprobs
     return_logprob: bool = False
@@ -899,7 +1018,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     ):
         enable_bin_sampling = any(req.enable_bin_sampling for req in reqs)
         return_logprob = any(req.return_logprob for req in reqs)
-        
+        return_entropy = any(req.return_entropy for req in reqs)
         return cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
@@ -907,8 +1026,17 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             tree_cache=tree_cache,
             model_config=model_config,
             enable_overlap=enable_overlap,
+            # ==========
+            # begin of soft thinking
+            # ==========
+            enable_soft_thinking=model_config.enable_soft_thinking,
+            max_topk=model_config.max_topk,
+            # ==========
+            # end of soft thinking
+            # ==========
             enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
+            return_entropy=return_entropy,
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),
             device=req_to_token_pool.device,
@@ -1566,6 +1694,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.output_ids = self.output_ids[keep_indices_device]
         self.enable_bin_sampling = any(req.enable_bin_sampling for req in self.reqs)
         self.return_logprob = any(req.return_logprob for req in self.reqs)
+        self.return_entropy = any(req.return_entropy for req in self.reqs)
         if self.return_logprob:
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
             self.token_ids_logprobs = [self.token_ids_logprobs[i] for i in keep_indices]
@@ -1613,6 +1742,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         self.enable_bin_sampling |= other.enable_bin_sampling
         self.return_logprob |= other.return_logprob
+        self.return_entropy |= other.return_entropy
         self.has_stream |= other.has_stream
         self.has_grammar |= other.has_grammar
         self.return_hidden_states |= other.return_hidden_states
@@ -1647,6 +1777,22 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 self.sampling_info.grammars = [req.grammar for req in self.reqs]
             else:
                 self.sampling_info.grammars = None
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        topk_probs = None
+        topk_indices = None
+        if self.model_config.enable_soft_thinking:
+            if self.enable_overlap or self.forward_mode.is_decode():
+                topk_probs = torch.stack([req.topk_prob for req in self.reqs])
+                topk_indices = torch.stack([req.topk_idx for req in self.reqs])
+
+        capture_hidden_mode = self._get_capture_hidden_mode()
+        # ==========
+        # end of soft thinking
+        # ==========
+
 
         global bid
         bid += 1
@@ -1660,6 +1806,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             seq_lens_sum=self.seq_lens_sum,
             enable_bin_sampling=self.enable_bin_sampling,
             return_logprob=self.return_logprob,
+            return_entropy=self.return_entropy,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
             global_num_tokens=self.global_num_tokens,
@@ -1693,7 +1840,33 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             ),
             extend_input_logprob_token_ids=self.extend_input_logprob_token_ids,
             launch_done=self.launch_done,
+            # ==========
+            # begin of soft thinking
+            # ==========
+            topk_probs=topk_probs,
+            topk_indices=topk_indices,
+            # ==========
+            # end of soft thinking
+            # ==========
         )
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    def _get_capture_hidden_mode(self):
+        if self.enable_soft_thinking:
+            if self.spec_info is not None:
+                self.spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
+            return CaptureHiddenMode.LAST
+        elif self.return_hidden_states:
+            return CaptureHiddenMode.FULL
+        elif self.spec_info:
+            return getattr(self.spec_info, "capture_hidden_mode", CaptureHiddenMode.NULL)
+        else:
+            return CaptureHiddenMode.NULL
+    # ==========
+    # end of soft thinking
+    # ==========
 
     def copy(self):
         # Only contain fields that will be used by process_batch_result
@@ -1704,6 +1877,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             out_cache_loc=self.out_cache_loc,
             enable_bin_sampling=self.enable_bin_sampling,
             return_logprob=self.return_logprob,
+            return_entropy=self.return_entropy,
             decoding_reqs=self.decoding_reqs,
             spec_algorithm=self.spec_algorithm,
             enable_custom_logit_processor=self.enable_custom_logit_processor,
@@ -1737,6 +1911,9 @@ class ModelWorkerBatch:
 
     # For bin sampling
     enable_bin_sampling: bool
+    
+    # For entropy
+    return_entropy: bool
     
     # For logprob
     return_logprob: bool
@@ -1781,6 +1958,16 @@ class ModelWorkerBatch:
 
     # Overlap event
     launch_done: Optional[threading.Event] = None
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    # For soft thinking mode
+    topk_probs: Optional[torch.Tensor] = None
+    topk_indices: Optional[torch.Tensor] = None
+    # ==========
+    # end of soft thinking
+    # ==========
 
 
 @triton.jit

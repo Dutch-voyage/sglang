@@ -128,6 +128,15 @@ class SchedulerOutputProcessorMixin:
                     if req.grammar is not None:
                         req.grammar.accept_token(next_token_id)
                         req.grammar.finished = req.finished()
+                    
+                    # ==========
+                    # begin of soft thinking
+                    # ==========
+                    if self.enable_soft_thinking:
+                        req.update_topk_info(logits_output, i)   
+                    # ==========
+                    # end of soft thinking
+                    # ==========
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
@@ -180,7 +189,7 @@ class SchedulerOutputProcessorMixin:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
 
-        self.stream_output(batch.reqs, batch.return_logprob, batch.enable_bin_sampling, skip_stream_req)
+        self.stream_output(batch.reqs, batch.return_logprob, batch.return_entropy, batch.enable_bin_sampling, skip_stream_req)
 
     def process_batch_result_decode(
         self: Scheduler,
@@ -241,6 +250,10 @@ class SchedulerOutputProcessorMixin:
             if req.enable_bin_sampling:
                 req.bin_sample_id.append(logits_output.bin_sample_id[i].cpu().clone().tolist())
                 req.intra_bin_probs.append(logits_output.intra_bin_probs[i].cpu().clone().tolist())
+            
+            if req.return_entropy:
+                req.entropy.append(logits_output.entropy[i].cpu().clone().tolist())
+                req.varentropy.append(logits_output.varentropy[i].cpu().clone().tolist())
 
             if req.return_logprob and batch.spec_algorithm.is_none():
                 # speculative worker handles logprob in speculative decoding
@@ -269,9 +282,18 @@ class SchedulerOutputProcessorMixin:
             if req.grammar is not None and batch.spec_algorithm.is_none():
                 req.grammar.accept_token(next_token_id)
                 req.grammar.finished = req.finished()
+            
+            # ==========
+            # begin of soft thinking
+            # ==========
+            if self.enable_soft_thinking:
+                req.update_topk_info(logits_output, i)   
+            # ==========
+            # end of soft thinking
+            # ==========
 
         self.set_next_batch_sampling_info_done(batch)
-        self.stream_output(batch.reqs, batch.return_logprob, batch.enable_bin_sampling)
+        self.stream_output(batch.reqs, batch.return_logprob, batch.return_entropy, batch.enable_bin_sampling)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
@@ -450,12 +472,13 @@ class SchedulerOutputProcessorMixin:
         self: Scheduler,
         reqs: List[Req],
         return_logprob: bool,
+        return_entropy: bool,
         enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
     ):
         """Stream the output to detokenizer."""
         if self.is_generation:
-            self.stream_output_generation(reqs, return_logprob, enable_bin_sampling, skip_req)
+            self.stream_output_generation(reqs, return_logprob, return_entropy, enable_bin_sampling, skip_req)
         else:  # embedding or reward model
             self.stream_output_embedding(reqs)
 
@@ -463,6 +486,7 @@ class SchedulerOutputProcessorMixin:
         self: Scheduler,
         reqs: List[Req],
         return_logprob: bool,
+        return_entropy: bool,
         enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
     ):
@@ -488,6 +512,12 @@ class SchedulerOutputProcessorMixin:
             intra_bin_probs = []
         else:
             bin_sample_id = intra_bin_probs = None
+        
+        if return_entropy:
+            entropy = []
+            varentropy = []
+        else:
+            entropy = varentropy = None
 
         if return_logprob:
             input_token_logprobs_val = []
@@ -512,6 +542,16 @@ class SchedulerOutputProcessorMixin:
             ) = input_token_ids_logprobs_idx = output_token_ids_logprobs_val = (
                 output_token_ids_logprobs_idx
             ) = None
+        
+        # ==========
+        # begin of soft thinking
+        # ==========
+        # Always initialize soft thinking output lists so they exist regardless of flag
+        output_topk_probs_list = []
+        output_topk_indices_list = []
+        # ==========
+        # end of soft thinking
+        # ==========
 
         for req in reqs:
             if req is skip_req:
@@ -577,6 +617,10 @@ class SchedulerOutputProcessorMixin:
                 if enable_bin_sampling:
                     bin_sample_id.append(req.bin_sample_id)
                     intra_bin_probs.append(req.intra_bin_probs)
+                
+                if return_entropy:
+                    entropy.append(req.entropy)
+                    varentropy.append(req.varentropy)
 
                 if return_logprob:
                     if (
@@ -650,6 +694,16 @@ class SchedulerOutputProcessorMixin:
                     if output_hidden_states is None:
                         output_hidden_states = []
                     output_hidden_states.append(req.hidden_states)
+                
+                # ==========
+                # begin of soft thinking
+                # ==========
+                if self.enable_soft_thinking:
+                    output_topk_probs_list.append(req.get_output_topk_prob_list())
+                    output_topk_indices_list.append(req.get_output_topk_idx_list())
+                # ==========
+                # end of soft thinking
+                # ==========
 
             if (
                 req.finished()
@@ -665,34 +719,44 @@ class SchedulerOutputProcessorMixin:
 
             self.send_to_detokenizer.send_pyobj(
                 BatchTokenIDOut(
-                    rids,
-                    finished_reasons,
-                    decoded_texts,
-                    decode_ids_list,
-                    read_offsets,
-                    output_ids,
-                    skip_special_tokens,
-                    spaces_between_special_tokens,
-                    no_stop_trim,
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    spec_verify_ct,
-                    bin_sample_id,
-                    intra_bin_probs,
-                    input_token_logprobs_val,
-                    input_token_logprobs_idx,
-                    output_token_logprobs_val,
-                    output_token_logprobs_idx,
-                    input_top_logprobs_val,
-                    input_top_logprobs_idx,
-                    output_top_logprobs_val,
-                    output_top_logprobs_idx,
-                    input_token_ids_logprobs_val,
-                    input_token_ids_logprobs_idx,
-                    output_token_ids_logprobs_val,
-                    output_token_ids_logprobs_idx,
-                    output_hidden_states,
+                    rids=rids,
+                    finished_reasons=finished_reasons,
+                    decoded_texts=decoded_texts,
+                    decode_ids=decode_ids_list,
+                    read_offsets=read_offsets,
+                    output_ids=output_ids,
+                    skip_special_tokens=skip_special_tokens,
+                    spaces_between_special_tokens=spaces_between_special_tokens,
+                    no_stop_trim=no_stop_trim,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=cached_tokens,
+                    spec_verify_ct=spec_verify_ct,
+                    # ==========
+                    # begin of soft thinking
+                    # ==========
+                    output_topk_probs_list=output_topk_probs_list,
+                    output_topk_indices_list=output_topk_indices_list,
+                    # ==========
+                    # end of soft thinking
+                    # ==========
+                    entropy=entropy,
+                    varentropy=varentropy,
+                    bin_sample_id=bin_sample_id,
+                    intra_bin_probs=intra_bin_probs,
+                    input_token_logprobs_val=input_token_logprobs_val,
+                    input_token_logprobs_idx=input_token_logprobs_idx,
+                    output_token_logprobs_val=output_token_logprobs_val,
+                    output_token_logprobs_idx=output_token_logprobs_idx,
+                    input_top_logprobs_val=input_top_logprobs_val,
+                    input_top_logprobs_idx=input_top_logprobs_idx,
+                    output_top_logprobs_val=output_top_logprobs_val,
+                    output_top_logprobs_idx=output_top_logprobs_idx,
+                    input_token_ids_logprobs_val=input_token_ids_logprobs_val,
+                    input_token_ids_logprobs_idx=input_token_ids_logprobs_idx,
+                    output_token_ids_logprobs_val=output_token_ids_logprobs_val,
+                    output_token_ids_logprobs_idx=output_token_ids_logprobs_idx,
+                    output_hidden_states=output_hidden_states,
                 )
             )
 

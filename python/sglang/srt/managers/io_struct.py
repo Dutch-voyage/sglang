@@ -18,6 +18,7 @@ processes (TokenizerManager, DetokenizerManager, Controller).
 
 import copy
 import uuid
+import heapq
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
@@ -65,12 +66,18 @@ class GenerateReqInput:
     ] = None
     # The audio input. Like image data, it can be a file name, a url, or base64 encoded string.
     audio_data: Optional[Union[List[AudioDataItem], AudioDataItem]] = None
+    # The maximum number of subrequests for group requests
+    max_subreq_num: Optional[Union[List[int], int]] = None  
+    # Whether to enable branch sampling
+    branch_enable: Optional[Union[List[bool], bool]] = None
     # The sampling_params. See descriptions below.
     sampling_params: Optional[Union[List[Dict], Dict]] = None
     # The request id.
     rid: Optional[Union[List[str], str]] = None
     # Whether to enable bin sampling
     enable_bin_sampling: Optional[Union[List[bool], bool]] = None
+    # Whether to return entropy
+    return_entropy: Optional[Union[List[bool], bool]] = None
     # Whether to return logprobs.
     return_logprob: Optional[Union[List[bool], bool]] = None
     # If return logprobs, the start location in the prompt for returning logprobs.
@@ -127,6 +134,9 @@ class GenerateReqInput:
         self._validate_inputs()
         self._determine_batch_size()
         self._handle_parallel_sampling()
+        
+        # TODO: enable different max_subreq_num in a batch
+        self._handle_group_request()
 
         if self.is_single:
             self._normalize_single_inputs()
@@ -176,6 +186,15 @@ class GenerateReqInput:
                 self.is_single = False
                 self.batch_size = len(self.input_embeds)
 
+    def _handle_group_request(self):
+        """Handle group request parameters and adjust batch size if needed."""
+        if self.parallel_sample_num > 1:
+            self.max_subreq_num = self.parallel_sample_num
+        elif self.branch_enable:
+            self.max_subreq_num = self.sampling_params[0].get("max_branch_node_num", 1)
+        else:
+            self.max_subreq_num = 1
+
     def _handle_parallel_sampling(self):
         """Handle parallel sampling parameters and adjust batch size if needed."""
         # Determine parallel sample count
@@ -207,6 +226,8 @@ class GenerateReqInput:
             self.rid = uuid.uuid4().hex
         if self.enable_bin_sampling is None:
             self.enable_bin_sampling = False
+        if self.return_entropy is None:
+            self.return_entropy = False
         if self.return_logprob is None:
             self.return_logprob = False
         if self.logprob_start_len is None:
@@ -234,6 +255,7 @@ class GenerateReqInput:
         self._normalize_rid(num)
         self._normalize_logprob_params(num)
         self._normalize_enable_bin_sampling(num)
+        self._normalize_return_entropy(num)
         self._normalize_custom_logit_processor(num)
 
     def _expand_inputs(self, num):
@@ -323,6 +345,24 @@ class GenerateReqInput:
             self.rid = [uuid.uuid4().hex for _ in range(num)]
         elif not isinstance(self.rid, list):
             raise ValueError("The rid should be a list for batch processing.")
+
+    def _normalize_return_entropy(self, num):
+        """Normalize return_entropy for batch processing."""
+        # Helper function to normalize a parameter
+        def normalize_param(param, default_value, param_name):
+            if param is None:
+                return [default_value] * num
+            elif not isinstance(param, list):
+                return [param] * num
+            else:
+                if self.parallel_sample_num > 1:
+                    raise ValueError(
+                        f"Cannot use list {param_name} with parallel_sample_num > 1"
+                    )
+                return param
+        self.return_entropy = normalize_param(
+            self.return_entropy, False, "return_entropy"
+        )
 
     def _normalize_enable_bin_sampling(self, num):
         """Normalize enable_bin_sampling for batch processing."""
@@ -415,6 +455,8 @@ class GenerateReqInput:
             audio_data=self.audio_data[i],
             enable_bin_sampling=self.enable_bin_sampling[i],
             sampling_params=self.sampling_params[i],
+            return_entropy=self.return_entropy[i],
+            max_subreq_num=self.max_subreq_num,
             rid=self.rid[i],
             return_logprob=self.return_logprob[i],
             logprob_start_len=self.logprob_start_len[i],
@@ -442,8 +484,7 @@ class GenerateReqInput:
                 self.bootstrap_room[i] if self.bootstrap_room is not None else None
             ),
         )
-
-
+    
 @dataclass
 class TokenizedGenerateReqInput:
     # The request id
@@ -458,6 +499,8 @@ class TokenizedGenerateReqInput:
     sampling_params: SamplingParams
     # Whether to enable bin sampling
     enable_bin_sampling: bool
+    # Whether to return entropy
+    return_entropy: bool
     # Whether to return the logprobs
     return_logprob: bool
     # If return logprobs, the start location in the prompt for returning logprobs.
@@ -489,8 +532,54 @@ class TokenizedGenerateReqInput:
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
     bootstrap_room: Optional[int] = None
+    
+    def regenerate_id(self):
+        self.rid = uuid.uuid4().hex
+        return self.rid
 
+    def __lt__(self, other):
+        return self.rid < other.rid
 
+@dataclass
+class GroupTokenizedGenerateReqInput:
+    # rid is copied from TokenizedGenerateReqInput, which is same as what is created for GenerateReqInput
+    rid: str
+    # reqs: List[TokenizedGenerateReqInput]
+    waiting_queue: List[tuple[int, TokenizedGenerateReqInput]]
+    
+    max_subreq_num: int
+    
+    num_requests: int = 0
+    
+    def __init__(self, rid: str, waiting_queue: List[tuple[int, TokenizedGenerateReqInput]], max_subreq_num: int, num_requests: int):
+        self.rid = rid
+        self.waiting_queue = waiting_queue
+        self.max_subreq_num = max_subreq_num
+        self.num_requests = num_requests
+    
+    @property
+    def group_size(self):
+        return len(self.reqs)
+    
+    @classmethod
+    def from_single_request(cls, req: TokenizedGenerateReqInput, max_subreq_num: int):
+        return cls(rid=req.rid, waiting_queue=[(0, req)], max_subreq_num=max_subreq_num, num_requests=1)
+    
+    def add_new_request(self, priority: int, req: TokenizedGenerateReqInput):
+        heapq.heappush(self.waiting_queue, (priority, req))
+        self.num_requests += 1
+    
+    def _get_next_request(self):
+        if len(self.waiting_queue) == 0:
+            return None
+        return heapq.heappop(self.waiting_queue)[1]
+
+    def finished(self):
+        return len(self.waiting_queue) == 0
+    
+    def exceed_max_subreq_num(self):
+        return self.num_requests >= self.max_subreq_num
+    
 @dataclass
 class EmbeddingReqInput:
     # The input prompt. It can be a single prompt or a batch of prompts.
@@ -626,6 +715,10 @@ class BatchTokenIDOut:
     # For bin sampling
     bin_sample_id: Optional[List[int]]
     intra_bin_probs: Optional[List[float]]
+    
+    # Entropy
+    entropy: Optional[List[float]]
+    varentropy: Optional[List[float]]
 
     # Logprobs
     input_token_logprobs_val: List[float]
@@ -643,6 +736,16 @@ class BatchTokenIDOut:
 
     # Hidden states
     output_hidden_states: List[List[float]]
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    # Soft thinking
+    output_topk_probs_list: Optional[List[List[List[float]]]]
+    output_topk_indices_list: Optional[List[List[List[int]]]]
+    # ==========
+    # end of soft thinking
+    # ==========
 
 
 @dataclass
@@ -677,6 +780,10 @@ class BatchStrOut:
     # For bin sampling
     bin_sample_id: Optional[List[int]]
     intra_bin_probs: Optional[List[float]]
+    
+    # Entropy
+    entropy: Optional[List[float]]
+    varentropy: Optional[List[float]]
 
     # Logprobs
     input_token_logprobs_val: List[float]
@@ -694,6 +801,15 @@ class BatchStrOut:
 
     # Hidden states
     output_hidden_states: List[List[float]]
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    output_topk_probs_list: List[List[List[float]]]
+    output_topk_indices_list: List[List[List[int]]]
+    # ==========
+    # end of soft thinking
+    # ==========
 
 
 @dataclass

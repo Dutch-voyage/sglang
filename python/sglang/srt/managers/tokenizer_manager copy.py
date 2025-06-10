@@ -158,83 +158,6 @@ class ReqState:
     output_token_ids_logprobs_val: List = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_idx: List = dataclasses.field(default_factory=list)
 
-from sglang.srt.managers.io_struct import GroupTokenizedGenerateReqInput
-from typing import Callable
-# Define GroupRequestManager before TokenizerManager
-
-def default_priority_func(req: TokenizedGenerateReqInput):
-    return 0
-
-class GroupRequestManager:
-    def __init__(self, 
-                 tokenizer_manager: "TokenizerManager", 
-                 group_tokenized_obj: GroupTokenizedGenerateReqInput, 
-                 max_subreq_num: int,
-                 max_parallel_requests: int = 4,
-                 pritority_func: Callable[[TokenizedGenerateReqInput], int] = default_priority_func,
-                 ):
-        
-        self.tm = tokenizer_manager
-        self.group_tokenized_obj = group_tokenized_obj
-        self.max_subreq_num = max_subreq_num
-        self.max_parallel_requests = max_parallel_requests
-        self.pritority_func = pritority_func
-   
-   # NOTE: not used here  
-    def _extend_requests_to_queue(self, reqs: List[TokenizedGenerateReqInput]):
-        for req in reqs:
-            self.group_tokenized_obj.add_new_request(self.pritority_func(req), req)
-    
-    def _get_next_request(self):
-        if len(self.group_tokenized_obj.waiting_queue) == 0:
-            return None
-        return self.group_tokenized_obj._get_next_request()
-    
-    def _generate_reqs(self, obj, request):
-        if obj.sampling_params.get("n", 1) > 1:
-            for _ in range(obj.sampling_params["n"]):
-                if self.group_tokenized_obj.exceed_max_subreq_num():
-                    break
-                new_req = copy.deepcopy(self.group_tokenized_obj.waiting_queue[0][1])
-                new_req.regenerate_id()
-                self.group_tokenized_obj.add_new_request(self.pritority_func(new_req), new_req)
-                
-        elif getattr(obj, "branch_enabled", True):
-            pass
-        else:
-            assert False, "Not supporting group request expect parallel_sample_num > 1 or branch_enabled = True"
-        
-    async def _handle_single_request(self, 
-                                     obj: GenerateReqInput,
-                                     request: Optional[fastapi.Request] = None,
-                                    ):
-        self._generate_reqs(obj, request)
-        outputs = []
-        generators = []
-        while not self.group_tokenized_obj.finished():
-            for _ in range(self.max_parallel_requests):
-                new_req = self._get_next_request()
-                if new_req is None:
-                    break
-                created_time = time.time()
-                self.tm._send_one_request(obj, new_req, created_time)
-                generators.append(self.tm._wait_one_response(obj, new_req, request))
-            out = await asyncio.gather(*(gen.__anext__() for gen in generators))
-            # TODO: more request added for branch search
-            if not self.group_tokenized_obj.exceed_max_subreq_num():
-                self._generate_reqs(obj, request)
-            outputs.extend(out)
-        
-        yield outputs
-
-    async def _handle_batch_request(self, 
-                                    obj: GenerateReqInput,
-                                    request: Optional[fastapi.Request] = None,
-                                    ):
-        pass
-
-
-
 
 class TokenizerManager:
     """TokenizerManager is a process that tokenizes the text."""
@@ -334,14 +257,6 @@ class TokenizerManager:
         # Set after scheduler is initialized
         self.max_req_input_len = None
 
-        # ==========
-        # begin of soft thinking
-        # ==========
-        self.enable_soft_thinking = server_args.enable_soft_thinking
-        # ==========
-        # end of soft thinking
-        # ==========
-        
         # Metrics
         if self.enable_metrics:
             self.metrics_collector = TokenizerMetricsCollector(
@@ -479,112 +394,7 @@ class TokenizerManager:
             self.bootstrap_server = kv_bootstrap_server_class(
                 self.server_args.disaggregation_bootstrap_port
             )
-        
-    
-    async def generate_group_request(
-        self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput],
-        request: Optional[fastapi.Request] = None,
-    ):
-        created_time = time.time()
-        
-        self.auto_create_handle_loop()
-        
-        if isinstance(obj, EmbeddingReqInput) and self.is_generation:
-            raise ValueError(
-                "This model does not appear to be an embedding model by default. "
-                "Please add `--is-embedding` when launching the server or try another model."
-            )
 
-        obj.normalize_batch_and_arguments()
-
-        if self.log_requests:
-            max_length, skip_names, _ = self.log_request_metadata
-            logger.info(
-                f"Receive: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)}"
-            )
-
-        async with self.model_update_lock.reader_lock:
-            is_single = obj.is_single
-            if is_single:
-                async for response in self._handle_single_request_group(
-                    obj, request, created_time):
-                    yield response
-            else:
-                async for response in self._handle_batch_request_group(
-                    obj, request, created_time
-                ):
-                    yield response
-                    
-    async def _handle_single_request_group(
-        self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput],
-        request: Optional[fastapi.Request] = None,
-        created_time: Optional[float] = None,
-    ):
-        tokenized_obj = await self._tokenize_one_request(obj)
-        group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, obj.max_subreq_num)
-        group_req_manager = GroupRequestManager(self, group_tokenized_obj, obj.max_subreq_num)
-        async for response in group_req_manager._handle_single_request(obj, request):
-            yield response
-    
-    async def _handle_batch_request_group(
-        self,
-        obj: Union[GenerateReqInput, EmbeddingReqInput],
-        request: Optional[fastapi.Request] = None,
-        created_time: Optional[float] = None,
-    ):
-
-        batch_size = obj.batch_size
-        generators = []
-        rids = []
-        if self.server_args.enable_tokenizer_batch_encode:
-            # Validate batch tokenization constraints
-            self._validate_batch_tokenization_constraints(batch_size, obj)
-
-            tokenized_objs = await self._batch_tokenize_and_process(batch_size, obj)
-
-            for i, tokenized_obj in enumerate(tokenized_objs):
-                tmp_obj = obj[i]
-                group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, tmp_obj.max_subreq_num)
-                group_req_manager = GroupRequestManager(self, group_tokenized_obj, tmp_obj.max_subreq_num)
-                generators.append(group_req_manager._handle_single_request(tmp_obj, request))
-                rids.append(tmp_obj.rid)
-
-        else:
-            # Sequential tokenization and processing
-            for i in range(batch_size):
-                tmp_obj = obj[i]
-                tokenized_obj = await self._tokenize_one_request(tmp_obj)
-                group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, tmp_obj.max_subreq_num)
-                group_req_manager = GroupRequestManager(self, group_tokenized_obj, tmp_obj.max_subreq_num)
-                generators.append(group_req_manager._handle_single_request(tmp_obj, request))
-                rids.append(tmp_obj.rid)
-        
-        # Wait for all requests
-        is_stream = hasattr(obj, "stream") and obj.stream
-        if not is_stream:
-            outputs = await asyncio.gather(*(gen.__anext__() for gen in generators))
-            yield outputs
-        else:
-            rid_to_index = {rid: i for i, rid in enumerate(rids)}
-            task_map = {asyncio.create_task(gen.__anext__()): gen for gen in generators}
-            while task_map:
-                done, _ = await asyncio.wait(
-                    task_map.keys(), return_when=asyncio.FIRST_COMPLETED
-                )
-
-                for task in done:
-                    gen = task_map.pop(task)
-                    try:
-                        result = task.result()
-                        result["index"] = rid_to_index[result["meta_info"]["id"]]
-                        yield result
-                        new_task = asyncio.create_task(gen.__anext__())
-                        task_map[new_task] = gen
-                    except StopAsyncIteration:
-                        pass
-     
     async def generate_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
@@ -607,28 +417,19 @@ class TokenizerManager:
             logger.info(
                 f"Receive: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)}"
             )
-            
+
         async with self.model_update_lock.reader_lock:
             is_single = obj.is_single
-            is_group = obj.branch_enable or obj.parallel_sample_num > 1
-            if is_group:
-                if is_single:
-                    async for response in self._handle_single_request_group(obj, request, created_time):
-                        yield response
-                else:
-                    async for response in self._handle_batch_request_group(obj, request, created_time):
-                        yield response
+            if is_single:
+                tokenized_obj = await self._tokenize_one_request(obj)
+                self._send_one_request(obj, tokenized_obj, created_time)
+                async for response in self._wait_one_response(obj, request):
+                    yield response
             else:
-                if is_single:
-                    tokenized_obj = await self._tokenize_one_request(obj)
-                    self._send_one_request(obj, tokenized_obj, created_time)
-                    async for response in self._wait_one_response(obj, request):
-                        yield response
-                else:
-                    async for response in self._handle_batch_request(
-                        obj, request, created_time
-                    ):
-                        yield response
+                async for response in self._handle_batch_request(
+                    obj, request, created_time
+                ):
+                    yield response
 
     async def _tokenize_one_request(
         self,
@@ -830,18 +631,15 @@ class TokenizerManager:
     ):
         self.send_to_scheduler.send_pyobj(tokenized_obj)
         state = ReqState([], False, asyncio.Event(), obj, created_time=created_time)
-        # self.rid_to_state[obj.rid] = state
-        self.rid_to_state[tokenized_obj.rid] = state
+        self.rid_to_state[obj.rid] = state
 
     async def _wait_one_response(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
-        new_req: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput] = None,
         request: Optional[fastapi.Request] = None,
     ):
         """Wait for the response of one request."""
-        rid = new_req.rid if new_req else obj.rid
-        state = self.rid_to_state[rid]
+        state = self.rid_to_state[obj.rid]
 
         while True:
             try:
@@ -849,10 +647,10 @@ class TokenizerManager:
             except asyncio.TimeoutError:
                 if request is not None and await request.is_disconnected():
                     # Abort the request for disconnected requests (non-streaming, waiting queue)
-                    self.abort_request(rid)
+                    self.abort_request(obj.rid)
                     # Use exception to kill the whole call stack and asyncio task
                     raise ValueError(
-                        f"Request is disconnected from the client side (type 1). Abort request {rid=}"
+                        f"Request is disconnected from the client side (type 1). Abort request {obj.rid=}"
                     )
                 continue
 
@@ -882,7 +680,6 @@ class TokenizerManager:
 
             state.event.clear()
 
-            # TODO: handle stream
             if obj.stream:
                 yield out
             else:
@@ -1353,8 +1150,12 @@ class TokenizerManager:
                 )
             
             if getattr(state.obj, "return_entropy", False):
-                meta_info["entropy"] = recv_obj.entropy[i]
-                meta_info["varentropy"] = recv_obj.varentropy[i]
+                self.convert_entropy_style(
+                    meta_info,
+                    state,
+                    recv_obj,
+                    i,
+                )
                 
             if getattr(state.obj, "return_logprob", False):
                 self.convert_logprob_style(
@@ -1367,15 +1168,6 @@ class TokenizerManager:
                     recv_obj,
                     i,
                 )
-            
-            if self.enable_soft_thinking:
-                meta_info["output_topk_prob_list"] = (
-                    recv_obj.output_topk_probs_list[i]
-                )
-                meta_info["output_topk_idx_list"] = (
-                    recv_obj.output_topk_indices_list[i]
-                ) 
-
 
             if not isinstance(recv_obj, BatchEmbeddingOut):
                 meta_info.update(
@@ -1455,6 +1247,17 @@ class TokenizerManager:
             return_text_in_logprobs,
         )
 
+
+    def convert_entropy_style(
+        self,
+        meta_info: dict,
+        state: ReqState,
+        recv_obj: BatchStrOut,
+        recv_obj_index: int,
+    ):
+        meta_info["entropy"] = recv_obj.entropy[recv_obj_index]
+        meta_info["varentropy"] = recv_obj.varentropy[recv_obj_index]
+        
     def convert_logprob_style(
         self,
         meta_info: dict,

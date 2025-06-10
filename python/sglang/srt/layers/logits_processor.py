@@ -73,6 +73,11 @@ class LogitsProcessorOutput:
     bin_sample_id: Optional[torch.Tensor] = None
     intra_bin_probs: Optional[torch.Tensor] = None
     
+    # The entropy of the next tokens. shape: [#seq]
+    entropy: Optional[torch.Tensor] = None
+    # The variance of the entropy of the next tokens. shape: [#seq]
+    varentropy: Optional[torch.Tensor] = None
+    
     # The logprobs of the next tokens.                              shape: [#seq]
     next_token_logprobs: Optional[torch.Tensor] = None
     # The logprobs and ids of the top-k tokens in output positions. shape: [#seq, k]
@@ -91,6 +96,15 @@ class LogitsProcessorOutput:
     # The logprobs and ids of the requested token ids in input positions. shape: [#seq, n] (n is the number of requested token ids)
     input_token_ids_logprobs_val: Optional[List] = None
     input_token_ids_logprobs_idx: Optional[List] = None
+    
+    # ==========
+    # begin of soft thinking
+    # ==========
+    topk_probs: Optional[torch.Tensor] = None
+    topk_indices: Optional[torch.Tensor] = None
+    # ==========
+    # end of soft thinking
+    # ==========
 
 
 @dataclasses.dataclass
