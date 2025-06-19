@@ -360,15 +360,7 @@ class TokenizerManager:
 
         # Set after scheduler is initialized
         self.max_req_input_len = None
-
-        # ==========
-        # begin of soft thinking
-        # ==========
-        self.enable_soft_thinking = server_args.enable_soft_thinking
-        # ==========
-        # end of soft thinking
-        # ==========
-        
+                
         # Metrics
         if self.enable_metrics:
             self.metrics_collector = TokenizerMetricsCollector(
@@ -1397,14 +1389,6 @@ class TokenizerManager:
                     recv_obj,
                     i,
                 )
-            
-            if self.enable_soft_thinking:
-                meta_info["output_topk_prob_list"] = (
-                    recv_obj.output_topk_probs_list[i]
-                )
-                meta_info["output_topk_idx_list"] = (
-                    recv_obj.output_topk_indices_list[i]
-                ) 
 
             if not isinstance(recv_obj, BatchEmbeddingOut):
                 meta_info.update(

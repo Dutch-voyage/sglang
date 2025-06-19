@@ -235,14 +235,6 @@ class ModelRunner:
             "pp_proxy_tensors" in inspect.signature(self.model.forward).parameters
         )
         
-        # ==========
-        # begin of soft thinking
-        # ==========
-        self.enable_soft_thinking = server_args.enable_soft_thinking
-        # ==========
-        # end of soft thinking
-        # ==========
-
     def initialize(self, min_per_gpu_memory: float):
         server_args = self.server_args
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -1125,22 +1117,10 @@ class ModelRunner:
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
-        # ==========
-        # begin of soft thinking
-        # ==========
-        if self.enable_soft_thinking:
-            return self.model.forward(
-                None, 
-                forward_batch.positions, 
-                forward_batch,
-            )
-        else:
-            return self.model.forward(
-                forward_batch.input_ids, forward_batch.positions, forward_batch
-            )
-        # ==========
-        # end of soft thinking
-        # ==========
+        
+        return self.model.forward(
+            forward_batch.input_ids, forward_batch.positions, forward_batch, **kwargs
+        )
 
     def forward_extend(
         self,
@@ -1272,7 +1252,6 @@ class ModelRunner:
         next_token_ids = self.sampler(
             logits_output=logits_output,
             sampling_info=forward_batch.sampling_info,
-            enable_soft_thinking=self.enable_soft_thinking,
             enable_bin_sampling=forward_batch.enable_bin_sampling,
             return_logprob=forward_batch.return_logprob,
             return_entropy=forward_batch.return_entropy,

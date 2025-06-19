@@ -160,15 +160,6 @@ class ForwardBatch:
     # NOTE: added for bin sampling
     enable_bin_sampling: bool = False
     
-    # ==========
-    # begin of soft thinking
-    # ==========
-    topk_probs: Optional[torch.Tensor] = None
-    topk_indices: Optional[torch.Tensor] = None
-    # ==========
-    # end of soft thinking
-    # ==========
-
     # For logprob
     return_logprob: bool = False
     return_entropy: bool = False
@@ -290,14 +281,6 @@ class ForwardBatch:
             encoder_lens_cpu=batch.encoder_lens_cpu,
             encoder_out_cache_loc=batch.encoder_out_cache_loc,
             seq_lens_sum=batch.seq_lens_sum,
-            # ==========
-            # begin of soft thinking
-            # ==========
-            topk_probs=batch.topk_probs,
-            topk_indices=batch.topk_indices,
-            # ==========
-            # end of soft thinking
-            # ==========
             enable_bin_sampling=batch.enable_bin_sampling,
             return_logprob=batch.return_logprob,
             return_entropy=batch.return_entropy,

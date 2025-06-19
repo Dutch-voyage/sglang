@@ -239,14 +239,6 @@ class DetokenizerManager:
             output_token_ids_logprobs_val=recv_obj.output_token_ids_logprobs_val,
             output_token_ids_logprobs_idx=recv_obj.output_token_ids_logprobs_idx,
             output_hidden_states=recv_obj.output_hidden_states,
-            # ==========
-            # begin of soft thinking
-            # ==========
-            output_topk_probs_list=recv_obj.output_topk_probs_list,
-            output_topk_indices_list=recv_obj.output_topk_indices_list,
-            # ==========
-            # end of soft thinking
-            # ==========
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):

@@ -463,15 +463,6 @@ class Scheduler(
             self.server_args.disaggregation_mode
         )
         self.init_disaggregation()
-        
-        # ==========
-        # begin of soft thinking
-        # ==========
-        self.enable_soft_thinking = server_args.enable_soft_thinking
-        self.max_topk = server_args.max_topk
-        # ==========
-        # end of soft thinking
-        # ==========
 
     def init_tokenizer(self):
         server_args = self.server_args
@@ -944,8 +935,6 @@ class Scheduler(
                 bootstrap_host=recv_req.bootstrap_host,
                 bootstrap_port=recv_req.bootstrap_port,
                 bootstrap_room=recv_req.bootstrap_room,
-                enable_soft_thinking=self.enable_soft_thinking,
-                max_topk=self.max_topk,
             )
             req.tokenizer = self.tokenizer
 

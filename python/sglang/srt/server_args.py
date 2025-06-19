@@ -219,16 +219,6 @@ class ServerArgs:
     disaggregation_transfer_backend: str = "mooncake"
     disaggregation_ib_device: Optional[str] = None
     pdlb_url: Optional[str] = None
-    
-    # ==========
-    # begin of soft thinking
-    # ==========
-    enable_soft_thinking: bool = False
-    think_end_str: str = "</think>"
-    max_topk: int = 30
-    # ==========
-    # end of soft thinking
-    # ==========
 
     def __post_init__(self):
         # Expert parallelism
@@ -1352,31 +1342,6 @@ class ServerArgs:
             action="store_true",
             help="Adopt base image processor instead of fast image processor.",
         )
-        
-        # ==========
-        # begin of soft thinking
-        # ==========
-        # Soft thinking mode
-        parser.add_argument(
-            "--enable-soft-thinking",
-            action="store_true",
-            help="Enable soft thinking mode"
-        )
-        
-        parser.add_argument(
-            "--think-end-str",
-            type=str,
-            default="</think>",
-        )
-        parser.add_argument(
-            "--max-topk",
-            type=int,
-            default=ServerArgs.max_topk,
-        )
-        # ==========
-        # end of soft thinking
-        # ==========
-
         # Server warmups
         parser.add_argument(
             "--warmups",

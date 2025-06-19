@@ -93,15 +93,6 @@ class Sampler(nn.Module):
                 logits_output.entropy = _entropy(probs)
                 logits_output.varentropy = _varentropy(probs)
             
-            # ==========
-            # begin of soft thinking
-            # ==========
-            if enable_soft_thinking:
-                logits_output.topk_probs[:, 0] = 1
-                logits_output.topk_indices[:, 0] = batch_next_token_ids
-            # ==========
-            # end of soft thinking
-            # ==========
         else:
             # Post process logits
             logits.div_(sampling_info.temperatures)
@@ -124,52 +115,24 @@ class Sampler(nn.Module):
                         top_p_normalize_probs_torch(probs, sampling_info.top_ps)
                     ).clamp(min=torch.finfo(probs.dtype).min)
 
-                
-                # will only send Reqs that are only composed of thinking process or not at all 
-                if enable_soft_thinking:
-                    # ==========
-                    # begin of soft thinking
-                    # ==========
-                    # entropy calculation
-                    entropy = -torch.sum(probs * torch.log(probs.clamp(min=1e-12)), dim=-1)
-                    soft_mask = sampling_info.soft_thinking_modes # Shape (B,)
-                    top_ks = torch.where(soft_mask, sampling_info.top_ks, sampling_info.after_thinking_top_ks)
-
-                    # NOTE: only top k sampling is supported 
-                    # top k 
-                    probs = top_k_renorm_prob(probs, top_ks)
-                    
-                    # max top k
-                    topk_probs, topk_indices = torch.topk(probs, k=sampling_info.max_topk, dim=-1) # slow
-                    topk_probs = topk_probs / (topk_probs.sum(dim=-1, keepdim=True))
-
-                    logits_output.topk_probs = topk_probs
-                    logits_output.topk_indices = topk_indices
-                    logits_output.entropy = entropy
-                    batch_next_token_ids = topk_indices[:, 0].to(torch.int32)
-                    # ==========
-                    # end of soft thinking
-                    # ========== 
+                max_top_k_round, batch_size = 32, probs.shape[0]
+                                
+                if sampling_info.need_min_p_sampling:
+                    probs = top_k_renorm_prob(probs, sampling_info.top_ks)
+                    probs = top_p_renorm_prob(probs, sampling_info.top_ps)
+                    batch_next_token_ids = min_p_sampling_from_probs(
+                        probs, sampling_info.min_ps
+                    )
                 else:
-                    if enable_soft_thinking:
-                        logger.warning("Soft thinking is not supported in the current implementation.") 
-                        pass
-                    if sampling_info.need_min_p_sampling:
-                        probs = top_k_renorm_prob(probs, sampling_info.top_ks)
-                        probs = top_p_renorm_prob(probs, sampling_info.top_ps)
-                        batch_next_token_ids = min_p_sampling_from_probs(
-                            probs, sampling_info.min_ps
-                        )
-                    else:
-                        # Check Nan will throw exception, only check when crash_on_warnings is True
-                        check_nan = self.use_nan_detection and crash_on_warnings()
-                        batch_next_token_ids = top_k_top_p_sampling_from_probs(
-                            probs,
-                            sampling_info.top_ks,
-                            sampling_info.top_ps,
-                            filter_apply_order="joint",
-                            check_nan=check_nan,
-                        )
+                    # Check Nan will throw exception, only check when crash_on_warnings is True
+                    check_nan = self.use_nan_detection and crash_on_warnings()
+                    batch_next_token_ids = top_k_top_p_sampling_from_probs(
+                        probs,
+                        sampling_info.top_ks,
+                        sampling_info.top_ps,
+                        filter_apply_order="joint",
+                        check_nan=check_nan,
+                    )
 
             elif global_server_args_dict["sampling_backend"] == "pytorch":
                 # A slower fallback implementation with torch native operations.

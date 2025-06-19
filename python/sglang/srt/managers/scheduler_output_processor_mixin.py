@@ -129,14 +129,6 @@ class SchedulerOutputProcessorMixin:
                         req.grammar.accept_token(next_token_id)
                         req.grammar.finished = req.finished()
                     
-                    # ==========
-                    # begin of soft thinking
-                    # ==========
-                    if self.enable_soft_thinking:
-                        req.update_topk_info(logits_output, i)   
-                    # ==========
-                    # end of soft thinking
-                    # ==========
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
@@ -282,15 +274,6 @@ class SchedulerOutputProcessorMixin:
             if req.grammar is not None and batch.spec_algorithm.is_none():
                 req.grammar.accept_token(next_token_id)
                 req.grammar.finished = req.finished()
-            
-            # ==========
-            # begin of soft thinking
-            # ==========
-            if self.enable_soft_thinking:
-                req.update_topk_info(logits_output, i)   
-            # ==========
-            # end of soft thinking
-            # ==========
 
         self.set_next_batch_sampling_info_done(batch)
         self.stream_output(batch.reqs, batch.return_logprob, batch.return_entropy, batch.enable_bin_sampling)
@@ -542,16 +525,6 @@ class SchedulerOutputProcessorMixin:
             ) = input_token_ids_logprobs_idx = output_token_ids_logprobs_val = (
                 output_token_ids_logprobs_idx
             ) = None
-        
-        # ==========
-        # begin of soft thinking
-        # ==========
-        # Always initialize soft thinking output lists so they exist regardless of flag
-        output_topk_probs_list = []
-        output_topk_indices_list = []
-        # ==========
-        # end of soft thinking
-        # ==========
 
         for req in reqs:
             if req is skip_req:
@@ -695,16 +668,6 @@ class SchedulerOutputProcessorMixin:
                         output_hidden_states = []
                     output_hidden_states.append(req.hidden_states)
                 
-                # ==========
-                # begin of soft thinking
-                # ==========
-                if self.enable_soft_thinking:
-                    output_topk_probs_list.append(req.get_output_topk_prob_list())
-                    output_topk_indices_list.append(req.get_output_topk_idx_list())
-                # ==========
-                # end of soft thinking
-                # ==========
-
             if (
                 req.finished()
                 and self.tp_rank == 0
@@ -732,14 +695,6 @@ class SchedulerOutputProcessorMixin:
                     completion_tokens=completion_tokens,
                     cached_tokens=cached_tokens,
                     spec_verify_ct=spec_verify_ct,
-                    # ==========
-                    # begin of soft thinking
-                    # ==========
-                    output_topk_probs_list=output_topk_probs_list,
-                    output_topk_indices_list=output_topk_indices_list,
-                    # ==========
-                    # end of soft thinking
-                    # ==========
                     entropy=entropy,
                     varentropy=varentropy,
                     bin_sample_id=bin_sample_id,
