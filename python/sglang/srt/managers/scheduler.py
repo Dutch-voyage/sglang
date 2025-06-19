@@ -189,6 +189,8 @@ class Scheduler(
         pp_rank: int,
         dp_rank: Optional[int],
     ):
+        # from remote_pdb import RemotePdb
+        # RemotePdb("localhost", 5555).set_trace()
         # Parse args
         self.server_args = server_args
         self.tp_rank = tp_rank

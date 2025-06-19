@@ -156,6 +156,7 @@ class Engine(EngineBase):
                 ImageDataItem,
             ]
         ] = None,
+        branch_enable: Optional[Union[List[bool], bool]] = False,
         enable_bin_sampling: Optional[Union[List[bool], bool]] = False,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         return_entropy: Optional[Union[List[bool], bool]] = False,
@@ -179,6 +180,7 @@ class Engine(EngineBase):
             input_ids=input_ids,
             sampling_params=sampling_params,
             image_data=image_data,
+            branch_enable=branch_enable,
             enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             return_entropy=return_entropy,
@@ -231,6 +233,7 @@ class Engine(EngineBase):
                 ImageDataItem,
             ]
         ] = None,
+        branch_enable: Optional[Union[List[bool], bool]] = False,
         enable_bin_sampling: Optional[Union[List[bool], bool]] = False,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         return_entropy: Optional[Union[List[bool], bool]] = False,
@@ -253,6 +256,7 @@ class Engine(EngineBase):
             input_ids=input_ids,
             sampling_params=sampling_params,
             image_data=image_data,
+            branch_enable=branch_enable,
             enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             return_entropy=return_entropy,

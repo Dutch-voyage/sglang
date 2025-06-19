@@ -22,8 +22,8 @@ def _get_bin_range(logits: torch.Tensor,
         bin_mask[i, :bin_size - 1] = 1
         bin_logits[i, :bin_size - 1] = (-torch.arange(bin_size - 1, device=logits.device)) * normalized_deltas[i] + logits_sorted[i, 0]
         # bin_logits[i, :bin_size - 1] = (-torch.arange(bin_size - 1, device=logits.device)).flip(dims=[0]) * deltas[i] + logits_sorted[i, 0]
-    intra_bin_probs = F.softmax(bin_logits, dim=-1)
-    del bin_logits
+    intra_bin_probs = F.softmax(bin_logits, dim=-1) 
+    del bin_logits  
     return bin_range, bin_mask, intra_bin_probs
 
 # @torch.compile

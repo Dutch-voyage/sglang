@@ -47,6 +47,8 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
+import numpy as np
+
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import (
@@ -170,7 +172,7 @@ class GroupRequestManager:
                  tokenizer_manager: "TokenizerManager", 
                  group_tokenized_obj: GroupTokenizedGenerateReqInput, 
                  max_subreq_num: int,
-                 max_parallel_requests: int = 4,
+                 max_parallel_requests: int = 16,
                  pritority_func: Callable[[TokenizedGenerateReqInput], int] = default_priority_func,
                  ):
         
@@ -188,19 +190,38 @@ class GroupRequestManager:
     def _get_next_request(self):
         if len(self.group_tokenized_obj.waiting_queue) == 0:
             return None
-        return self.group_tokenized_obj._get_next_request()
+        return self.group_tokenized_obj.pop_next_request()
     
     def _generate_reqs(self, obj, request):
         if obj.sampling_params.get("n", 1) > 1:
+            src_obj = self.group_tokenized_obj.get_next_request()
             for _ in range(obj.sampling_params["n"]):
                 if self.group_tokenized_obj.exceed_max_subreq_num():
                     break
-                new_req = copy.deepcopy(self.group_tokenized_obj.waiting_queue[0][1])
+                new_req = copy.deepcopy(src_obj)
                 new_req.regenerate_id()
                 self.group_tokenized_obj.add_new_request(self.pritority_func(new_req), new_req)
                 
-        elif getattr(obj, "branch_enabled", True):
-            pass
+        elif getattr(obj, "branch_enabled", True):                
+            for rid, outlist in self.group_tokenized_obj.rid_to_output.items():
+                if self.group_tokenized_obj.if_branched.get(rid, False):
+                    continue
+                self.group_tokenized_obj.if_branched[rid] = True
+                src_obj = self.group_tokenized_obj.rid_to_req[rid]
+                if getattr(obj, "entropy_first", True):
+                    assert "output_token_logprobs" in outlist["meta_info"].keys(), "output_token_logprobs is not in the output"
+                    topk_ent_idx = np.argsort(outlist["meta_info"]["entropy"])[:obj.sampling_params["branch_pos"]]
+                    # top 2nd to kth choices
+                    for i in range(obj.sampling_params["branch_pos"]):
+                        new_req = copy.deepcopy(src_obj)
+                        new_req.regenerate_id()
+                        new_req.input_ids += outlist["output_ids"][:topk_ent_idx[i] + 1]
+                        for j in range(1, obj.sampling_params["branch_pos"]):
+                            new_req.input_ids[-1] = outlist["meta_info"]["output_top_logprobs"][topk_ent_idx[i]][j][1] # replace the last token with the top-k choice
+                            self.group_tokenized_obj.add_new_request(self.pritority_func(new_req), new_req)
+                            self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((topk_ent_idx[i], new_req.rid))
+                            
+                    
         else:
             assert False, "Not supporting group request expect parallel_sample_num > 1 or branch_enabled = True"
         
@@ -209,34 +230,39 @@ class GroupRequestManager:
                                      request: Optional[fastapi.Request] = None,
                                     ):
         self._generate_reqs(obj, request)
-        outputs = []
-        generators = []
-        while not self.group_tokenized_obj.finished():
+        while not self.group_tokenized_obj.is_empty():
+            generators = []
             for _ in range(self.max_parallel_requests):
                 new_req = self._get_next_request()
                 if new_req is None:
                     break
                 created_time = time.time()
-                self.tm._send_one_request(obj, new_req, created_time)
-                generators.append(self.tm._wait_one_response(obj, new_req, request))
+                if self.group_tokenized_obj.exceed_max_subreq_num():
+                    yield list(self.group_tokenized_obj.rid_to_output.values())
+                else:
+                    self.tm._send_one_request(obj, new_req, created_time)
+                    self.group_tokenized_obj.sent_subreq_num += 1
+                    generators.append(self.tm._wait_one_response(obj, new_req, request))
             out = await asyncio.gather(*(gen.__anext__() for gen in generators))
-            # TODO: more request added for branch search
-            if not self.group_tokenized_obj.exceed_max_subreq_num():
-                self._generate_reqs(obj, request)
-            outputs.extend(out)
-        
-        yield outputs
+            # out: List[Dict[str, Any]] where each item is acquired from TokenizerManager.state.out_list
+            for o in out:
+                self.group_tokenized_obj.add_new_output(o["meta_info"]["id"], o)
+
+            self._generate_reqs(obj, request)
+            
 
     async def _handle_batch_request(self, 
                                     obj: GenerateReqInput,
                                     request: Optional[fastapi.Request] = None,
                                     ):
-        pass
-
-
-
+        generators = []
+        for i in range(obj.batch_size):
+            generators.append(self._handle_single_request(obj[i], request))
+        out = await asyncio.gather(*(gen.__anext__() for gen in generators))
+        yield out 
 
 class TokenizerManager:
+    
     """TokenizerManager is a process that tokenizes the text."""
 
     def __init__(
@@ -244,7 +270,6 @@ class TokenizerManager:
         server_args: ServerArgs,
         port_args: PortArgs,
     ):
-        # Parse args
         self.server_args = server_args
         self.enable_metrics = server_args.enable_metrics
         self.log_requests = server_args.log_requests
@@ -254,7 +279,9 @@ class TokenizerManager:
             if server_args.preferred_sampling_params
             else None
         )
-
+        # from remote_pdb import RemotePdb
+        # RemotePdb("localhost", 4444).set_trace()
+        
         # Init inter-process communication
         context = zmq.asyncio.Context(2)
         self.recv_from_detokenizer = get_zmq_socket(
@@ -855,7 +882,7 @@ class TokenizerManager:
                         f"Request is disconnected from the client side (type 1). Abort request {rid=}"
                     )
                 continue
-
+            
             out = state.out_list[-1]
 
             state.out_list = []
@@ -1352,6 +1379,9 @@ class TokenizerManager:
                     i,
                 )
             
+            if getattr(state.obj, "branch_enable", False):
+                meta_info["children"] = []
+                
             if getattr(state.obj, "return_entropy", False):
                 meta_info["entropy"] = recv_obj.entropy[i]
                 meta_info["varentropy"] = recv_obj.varentropy[i]
@@ -1375,7 +1405,6 @@ class TokenizerManager:
                 meta_info["output_topk_idx_list"] = (
                     recv_obj.output_topk_indices_list[i]
                 ) 
-
 
             if not isinstance(recv_obj, BatchEmbeddingOut):
                 meta_info.update(

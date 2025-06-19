@@ -38,11 +38,16 @@ class SamplingParams:
         min_p: float = 0.0,
         # ==========
         # begin of soft thinking
-        # ==========
         think_end_str: Optional[str] = None,
-        # ==========
         # end of soft thinking
         # ==========
+        # begin of branch search
+        branch_pos: int = 2, 
+        branch_k: int = 5,
+        max_branch_node_num: int = 10,
+        entropy_first: bool = True,
+        # ==========
+        # end of branch search
         bin_k: int = 5,
         normalized_delta: float = 1.0,
         frequency_penalty: float = 0.0,
