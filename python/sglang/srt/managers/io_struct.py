@@ -66,8 +66,8 @@ class GenerateReqInput:
     ] = None
     # The audio input. Like image data, it can be a file name, a url, or base64 encoded string.
     audio_data: Optional[Union[List[AudioDataItem], AudioDataItem]] = None
-    # The maximum number of subrequests for group requests
-    max_subreq_num: Optional[Union[List[int], int]] = None  
+    # Whether to enable probe
+    has_probe: Optional[Union[List[bool], bool]] = None
     # Whether to enable branch sampling
     branch_enable: Optional[Union[List[bool], bool]] = None
     # The sampling_params. See descriptions below.
@@ -76,6 +76,8 @@ class GenerateReqInput:
     rid: Optional[Union[List[str], str]] = None
     # Whether to enable bin sampling
     enable_bin_sampling: Optional[Union[List[bool], bool]] = None
+    # Whether to return logits
+    return_logits: Optional[Union[List[bool], bool]] = None
     # Whether to return entropy
     return_entropy: Optional[Union[List[bool], bool]] = None
     # Whether to return logprobs.
@@ -140,9 +142,6 @@ class GenerateReqInput:
         else:
             self._normalize_batch_inputs()
         
-        # TODO: enable different max_subreq_num in a batch
-        self._handle_group_request()
-
         self._validate_session_params()
 
     def _validate_inputs(self):
@@ -185,34 +184,7 @@ class GenerateReqInput:
             else:
                 self.is_single = False
                 self.batch_size = len(self.input_embeds)
-
-    def _handle_group_request(self):
-        """Handle group request parameters and adjust batch size if needed."""
-        if self.parallel_sample_num > 1:
-            self.max_subreq_num = self.parallel_sample_num
-        elif self.branch_enable:
-            if self.sampling_params is None:
-                assert False, "Please designate sampling params when enbale branch search"
-            elif isinstance(self.sampling_params, dict):
-                self.max_subreq_num = self.sampling_params.get("max_branch_node_num", 1)
-            elif isinstance(self.sampling_params, list):
-                self.max_subreq_num = [sampling_params.get("max_branch_node_num", 1) for sampling_params in self.sampling_params]
-            else:
-                assert False, "Wrong type of sampling params"
-        else:
-            # NOTE: max_subreq_num is not used except the occasions above
-            self.max_subreq_num = None
-        
-        # for batched generation, max_subreq_num is extended only to the batch size, the number of parallel samples does not count
-        self._normalize_max_subreq_num(self.batch_size)
-    
-    def _normalize_max_subreq_num(self, num):
-        """Normalize max_subreq_num for batch processing."""
-        if self.max_subreq_num is None:
-            self.max_subreq_num = [1] * num
-        elif not isinstance(self.max_subreq_num, list):
-            self.max_subreq_num = [self.max_subreq_num] * num
-
+            
     def _handle_parallel_sampling(self):
         """Handle parallel sampling parameters and adjust batch size if needed."""
         # Determine parallel sample count
@@ -242,12 +214,16 @@ class GenerateReqInput:
             self.sampling_params = {}
         if self.rid is None:
             self.rid = uuid.uuid4().hex
+        if self.has_probe is None:
+            self.has_probe = False
         if self.branch_enable is None:
             self.branch_enable = False
         if self.enable_bin_sampling is None:
             self.enable_bin_sampling = False
         if self.return_entropy is None:
             self.return_entropy = False
+        if self.return_logits is None:
+            self.return_logits = False
         if self.return_logprob is None:
             self.return_logprob = False
         if self.logprob_start_len is None:
@@ -274,10 +250,9 @@ class GenerateReqInput:
         self._normalize_sampling_params(num)
         self._normalize_rid(num)
         self._normalize_logprob_params(num)
-        self._normalize_branch_enable(num)
-        self._normalize_max_subreq_num(num)
         self._normalize_enable_bin_sampling(num)
         self._normalize_return_entropy(num)
+        self._normalize_return_logits(num)
         self._normalize_custom_logit_processor(num)
 
     def _expand_inputs(self, num):
@@ -370,13 +345,6 @@ class GenerateReqInput:
         elif isinstance(self.branch_enable, list):
             self.branch_enable = self.branch_enable * self.parallel_sample_num
 
-    def _normalize_max_subreq_num(self, num):
-        """Normalize max_subreq_num for batch processing."""
-        if self.max_subreq_num is None:
-            self.max_subreq_num = 1
-        elif not isinstance(self.max_subreq_num, list):
-            self.max_subreq_num = [self.max_subreq_num] * num
-
     def _normalize_rid(self, num):
         """Normalize request IDs for batch processing."""
         if self.rid is None:
@@ -401,6 +369,19 @@ class GenerateReqInput:
         self.return_entropy = normalize_param(
             self.return_entropy, False, "return_entropy"
         )
+        
+    def _normalize_return_logits(self, num):
+        """Normalize return_logits for batch processing."""
+        if self.return_logits is None:
+            self.return_logits = False
+        if not isinstance(self.return_logits, list):
+            self.return_logits = [self.return_logits] * num
+        else:
+            if self.parallel_sample_num > 1:
+                raise ValueError(
+                    "Cannot use list return_logits with parallel_sample_num > 1"
+                )
+            return self.return_logits
 
     def _normalize_enable_bin_sampling(self, num):
         """Normalize enable_bin_sampling for batch processing."""
@@ -491,11 +472,12 @@ class GenerateReqInput:
             input_ids=self.input_ids[i] if self.input_ids is not None else None,
             image_data=self.image_data[i],
             audio_data=self.audio_data[i],
+            has_probe=self.has_probe,
             enable_bin_sampling=self.enable_bin_sampling[i],
             sampling_params=self.sampling_params[i],
-            branch_enable=self.branch_enable[i],
+            branch_enable=self.branch_enable,
+            return_logits=self.return_logits[i],
             return_entropy=self.return_entropy[i],
-            max_subreq_num=self.max_subreq_num[i],
             rid=self.rid[i],
             return_logprob=self.return_logprob[i],
             logprob_start_len=self.logprob_start_len[i],
@@ -536,10 +518,14 @@ class TokenizedGenerateReqInput:
     mm_inputs: dict
     # The sampling parameters
     sampling_params: SamplingParams
+    # Whether to enable probe
+    has_probe: bool
     # Whether to enable bin sampling
     enable_bin_sampling: bool
     # Whether to return entropy
     return_entropy: bool
+    # Whether to return logits
+    return_logits: bool
     # Whether to return the logprobs
     return_logprob: bool
     # If return logprobs, the start location in the prompt for returning logprobs.
@@ -600,6 +586,14 @@ class GroupTokenizedGenerateReqInput:
     rid: str
     # reqs: List[TokenizedGenerateReqInput]
     waiting_queue: List[tuple[int, TokenizedGenerateReqInput]]
+    # number of subrequests sent
+    sent_subreq_num: int
+    # maximum number of subrequests
+    max_subreq_num: int
+    # number of subrequests expected to be finished
+    expect_finished_subreq_num: int
+    # number of subrequests finished
+    finished_subreq_num: int
     # rid to request
     rid_to_req: Dict[str, TokenizedGenerateReqInput]
     # rid to output
@@ -613,15 +607,21 @@ class GroupTokenizedGenerateReqInput:
                  waiting_queue: List[tuple[int, TokenizedGenerateReqInput]], 
                  # counter: AsyncSafeCounter,
                  sent_subreq_num: int,
+                 appended_subreq_num: int,
                  max_subreq_num: int,
+                 expect_finished_subreq_num: int,
+                 finished_subreq_num: int,
                  rid_to_req: Dict[str, TokenizedGenerateReqInput], 
                  rid_to_output: Dict[str, Union["BatchStrOut", "BatchTokenIDOut"]],
                  if_branched: Dict[str, bool]):
         
         self.rid = rid
         self.waiting_queue = waiting_queue
+        self.appended_subreq_num = appended_subreq_num
         self.sent_subreq_num = sent_subreq_num
         self.max_subreq_num = max_subreq_num
+        self.expect_finished_subreq_num = expect_finished_subreq_num
+        self.finished_subreq_num = finished_subreq_num
         self.rid_to_req = rid_to_req
         self.rid_to_output = rid_to_output
         self.if_branched = if_branched
@@ -631,11 +631,14 @@ class GroupTokenizedGenerateReqInput:
         return len(self.reqs)
     
     @classmethod
-    def from_single_request(cls, req: TokenizedGenerateReqInput, max_subreq_num: int):
+    def from_single_request(cls, req: TokenizedGenerateReqInput):
         return cls(rid=req.rid, 
                    waiting_queue=[(0, req)], 
+                   appended_subreq_num=1,
                    sent_subreq_num=0,
-                   max_subreq_num=max_subreq_num,
+                   max_subreq_num=req.sampling_params.max_branch_node_num if req.sampling_params.branch_enable else req.sampling_params.n,
+                   expect_finished_subreq_num=req.sampling_params.leaf_node_num if req.sampling_params.branch_enable else req.sampling_params.n,
+                   finished_subreq_num=0,
                    rid_to_req={req.rid: req}, 
                    rid_to_output={}, 
                    if_branched={req.rid: False})
@@ -644,6 +647,7 @@ class GroupTokenizedGenerateReqInput:
         heapq.heappush(self.waiting_queue, (priority, req))
         self.rid_to_req[req.rid] = req
         self.if_branched[req.rid] = False
+        self.appended_subreq_num += 1
     
     def add_new_output(self, rid: str, output: Union["BatchStrOut", "BatchTokenIDOut"]):
         self.rid_to_output[rid] = output
@@ -667,8 +671,14 @@ class GroupTokenizedGenerateReqInput:
     def is_empty(self):
         return len(self.waiting_queue) == 0
     
-    def exceed_max_subreq_num(self):  
+    def appended_exceed(self):  
+        return self.appended_subreq_num >= self.max_subreq_num * 8
+    
+    def sent_exceed(self):
         return self.sent_subreq_num >= self.max_subreq_num
+        
+    def should_finish(self):
+        return (self.max_subreq_num - self.sent_subreq_num) <= (self.expect_finished_subreq_num - self.finished_subreq_num)
 
 @dataclass
 class EmbeddingReqInput:
@@ -802,9 +812,15 @@ class BatchTokenIDOut:
     cached_tokens: Union[List[int], int]
     spec_verify_ct: Union[List[int], int]
     
+    # For probe
+    probe_result: Optional[Union[List[List[float]], List[float]]]
+    
     # For bin sampling
     bin_sample_id: Optional[Union[List[int], int]]
     intra_bin_probs: Optional[Union[List[float], float]]
+    
+    # Logits
+    logits: Optional[Union[List[List[float]], List[float]]]
     
     # Entropy
     entropy: Optional[Union[List[float], float]]
@@ -827,16 +843,6 @@ class BatchTokenIDOut:
     # Hidden states
     output_hidden_states: Union[List[List[float]], List[float]]
     
-    # ==========
-    # begin of soft thinking
-    # ==========
-    # Soft thinking
-    output_topk_probs_list: Optional[Union[List[List[List[float]]], List[List[float]]]]
-    output_topk_indices_list: Optional[Union[List[List[List[int]]], List[List[int]]]]
-    # ==========
-    # end of soft thinking
-    # ==========
-
     def __getitem__(self, i: int) -> "BatchTokenIDOut":
         return BatchTokenIDOut(
             rids=self.rids[i],
@@ -852,8 +858,10 @@ class BatchTokenIDOut:
             completion_tokens=self.completion_tokens[i],
             cached_tokens=self.cached_tokens[i],
             spec_verify_ct=self.spec_verify_ct[i],
+            probe_result=self.probe_result[i] if self.probe_result is not None else None,
             bin_sample_id=self.bin_sample_id[i] if self.bin_sample_id is not None else None,
             intra_bin_probs=self.intra_bin_probs[i] if self.intra_bin_probs is not None else None,
+            logits=self.logits[i] if self.logits is not None else None,
             entropy=self.entropy[i] if self.entropy is not None else None,
             varentropy=self.varentropy[i] if self.varentropy is not None else None,
             input_token_logprobs_val=self.input_token_logprobs_val[i],
@@ -867,8 +875,6 @@ class BatchTokenIDOut:
             output_token_ids_logprobs_val=self.output_token_ids_logprobs_val[i],
             output_token_ids_logprobs_idx=self.output_token_ids_logprobs_idx[i],
             output_hidden_states=self.output_hidden_states[i],
-            output_topk_probs_list=self.output_topk_probs_list[i] if self.output_topk_probs_list is not None else None,
-            output_topk_indices_list=self.output_topk_indices_list[i] if self.output_topk_indices_list is not None else None,
         )
 
     def __len__(self) -> int:
@@ -903,9 +909,15 @@ class BatchStrOut:
     cached_tokens: Union[List[int], int]
     spec_verify_ct: Union[List[int], int]
 
+    # For probe
+    probe_result: Optional[Union[List[List[float]], List[float]]]
+    
     # For bin sampling
     bin_sample_id: Optional[Union[List[int], int]]
     intra_bin_probs: Optional[Union[List[float], float]]
+    
+    # Logits
+    logits: Optional[Union[List[List[float]], List[float]]]
     
     # Entropy
     entropy: Optional[Union[List[float], float]]
@@ -928,15 +940,6 @@ class BatchStrOut:
     # Hidden states
     output_hidden_states: Union[List[List[float]], List[float]]
     
-    # ==========
-    # begin of soft thinking
-    # ==========
-    output_topk_probs_list: Union[List[List[List[float]]], List[List[float]]]
-    output_topk_indices_list: Union[List[List[List[int]]], List[List[int]]]
-    # ==========
-    # end of soft thinking
-    # ==========
-    
     def __getitem__(self, i: int) -> "BatchStrOut":
         return BatchStrOut(
             rids=self.rids[i],
@@ -947,8 +950,10 @@ class BatchStrOut:
             completion_tokens=self.completion_tokens[i],
             cached_tokens=self.cached_tokens[i],
             spec_verify_ct=self.spec_verify_ct[i],
+            probe_result=self.probe_result[i] if self.probe_result is not None else None,
             bin_sample_id=self.bin_sample_id[i] if self.bin_sample_id is not None else None,
             intra_bin_probs=self.intra_bin_probs[i] if self.intra_bin_probs is not None else None,
+            logits=self.logits[i] if self.logits is not None else None,
             entropy=self.entropy[i] if self.entropy is not None else None,
             varentropy=self.varentropy[i] if self.varentropy is not None else None,
             input_token_logprobs_val=self.input_token_logprobs_val[i],
@@ -964,8 +969,6 @@ class BatchStrOut:
             output_token_ids_logprobs_val=self.output_token_ids_logprobs_val[i],
             output_token_ids_logprobs_idx=self.output_token_ids_logprobs_idx[i],
             output_hidden_states=self.output_hidden_states[i],
-            output_topk_probs_list=self.output_topk_probs_list[i] if self.output_topk_probs_list is not None else None,
-            output_topk_indices_list=self.output_topk_indices_list[i] if self.output_topk_indices_list is not None else None,
         )
     
     def __len__(self) -> int:

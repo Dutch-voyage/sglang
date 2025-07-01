@@ -70,6 +70,10 @@ class LogitsProcessorOutput:
 
     ## Part 2: This part will be assigned in python/sglang/srt/layers/sampler.py::Sampler
     # NOTE: This part is extented to return the bin sampled logprobs and ids
+    
+    # NOTE: added for probe
+    probe_result: Optional[List[List]] = None
+    
     bin_sample_id: Optional[torch.Tensor] = None
     intra_bin_probs: Optional[torch.Tensor] = None
     

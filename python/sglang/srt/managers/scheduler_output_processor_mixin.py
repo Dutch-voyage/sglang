@@ -93,6 +93,20 @@ class SchedulerOutputProcessorMixin:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
 
+                    if req.has_probe:
+                        req.probe_result.append([probe_item[i].cpu().clone() for probe_item in logits_output.probe_result])
+
+                    if req.return_logits:
+                        req.logits.append(logits_output.next_token_logits[i].cpu().clone().tolist())
+
+                    if req.enable_bin_sampling:
+                        req.bin_sample_id.append(logits_output.bin_sample_id[i].cpu().clone().tolist())
+                        req.intra_bin_probs.append(logits_output.intra_bin_probs[i].cpu().clone().tolist())
+                    
+                    if req.return_entropy:
+                        req.entropy.append(logits_output.entropy[i].cpu().clone().tolist())
+                        req.varentropy.append(logits_output.varentropy[i].cpu().clone().tolist())
+                    
                     if req.return_logprob:
                         assert extend_logprob_start_len_per_req is not None
                         assert extend_input_len_per_req is not None
@@ -181,7 +195,13 @@ class SchedulerOutputProcessorMixin:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
 
-        self.stream_output(batch.reqs, batch.return_logprob, batch.return_entropy, batch.enable_bin_sampling, skip_stream_req)
+        self.stream_output(reqs=batch.reqs, 
+                           has_probe=batch.has_probe, 
+                           return_logprob=batch.return_logprob, 
+                           return_logits=batch.return_logits, 
+                           return_entropy=batch.return_entropy, 
+                           enable_bin_sampling=batch.enable_bin_sampling, 
+                           skip_req=skip_stream_req)
 
     def process_batch_result_decode(
         self: Scheduler,
@@ -239,6 +259,12 @@ class SchedulerOutputProcessorMixin:
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
                 
+            if req.has_probe:
+                req.probe_result.append([probe_item[i].cpu().clone() for probe_item in logits_output.probe_result])
+                
+            if req.return_logits:
+                req.logits.append(logits_output.next_token_logits[i].cpu().clone().tolist())
+                
             if req.enable_bin_sampling:
                 req.bin_sample_id.append(logits_output.bin_sample_id[i].cpu().clone().tolist())
                 req.intra_bin_probs.append(logits_output.intra_bin_probs[i].cpu().clone().tolist())
@@ -276,7 +302,12 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.set_next_batch_sampling_info_done(batch)
-        self.stream_output(batch.reqs, batch.return_logprob, batch.return_entropy, batch.enable_bin_sampling)
+        self.stream_output(reqs=batch.reqs, 
+                           has_probe=batch.has_probe, 
+                           return_logprob=batch.return_logprob, 
+                           return_logits=batch.return_logits, 
+                           return_entropy=batch.return_entropy, 
+                           enable_bin_sampling=batch.enable_bin_sampling)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
@@ -454,21 +485,31 @@ class SchedulerOutputProcessorMixin:
     def stream_output(
         self: Scheduler,
         reqs: List[Req],
+        has_probe: bool,
         return_logprob: bool,
+        return_logits: bool,
         return_entropy: bool,
         enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
     ):
         """Stream the output to detokenizer."""
         if self.is_generation:
-            self.stream_output_generation(reqs, return_logprob, return_entropy, enable_bin_sampling, skip_req)
+            self.stream_output_generation(reqs=reqs, 
+                                          has_probe=has_probe, 
+                                          return_logprob=return_logprob, 
+                                          return_logits=return_logits, 
+                                          return_entropy=return_entropy, 
+                                          enable_bin_sampling=enable_bin_sampling, 
+                                          skip_req=skip_req)
         else:  # embedding or reward model
             self.stream_output_embedding(reqs)
 
     def stream_output_generation(
         self: Scheduler,
         reqs: List[Req],
+        has_probe: bool,
         return_logprob: bool,
+        return_logits: bool,
         return_entropy: bool,
         enable_bin_sampling: bool,
         skip_req: Optional[Req] = None,
@@ -490,11 +531,21 @@ class SchedulerOutputProcessorMixin:
         spec_verify_ct = []
         output_hidden_states = None
         
+        if has_probe:
+            probe_result = []
+        else:
+            probe_result = None
+        
         if enable_bin_sampling:
             bin_sample_id = []
             intra_bin_probs = []
         else:
             bin_sample_id = intra_bin_probs = None
+            
+        if return_logits:
+            logits = []
+        else:
+            logits = None
         
         if return_entropy:
             entropy = []
@@ -586,6 +637,12 @@ class SchedulerOutputProcessorMixin:
 
                 if not self.spec_algorithm.is_none():
                     spec_verify_ct.append(req.spec_verify_ct)
+                
+                if has_probe:
+                    probe_result.append(req.probe_result)
+                
+                if return_logits:
+                    logits.append(req.logits)
                     
                 if enable_bin_sampling:
                     bin_sample_id.append(req.bin_sample_id)
@@ -679,7 +736,7 @@ class SchedulerOutputProcessorMixin:
         if rids:
             if self.model_config.is_multimodal_gen:
                 return
-
+            
             self.send_to_detokenizer.send_pyobj(
                 BatchTokenIDOut(
                     rids=rids,
@@ -695,6 +752,8 @@ class SchedulerOutputProcessorMixin:
                     completion_tokens=completion_tokens,
                     cached_tokens=cached_tokens,
                     spec_verify_ct=spec_verify_ct,
+                    probe_result=probe_result,
+                    logits=logits,
                     entropy=entropy,
                     varentropy=varentropy,
                     bin_sample_id=bin_sample_id,

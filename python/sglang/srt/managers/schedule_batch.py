@@ -427,7 +427,9 @@ class Req:
         origin_input_text: str,
         origin_input_ids: Tuple[int],
         sampling_params: SamplingParams,
+        has_probe: bool = False,
         enable_bin_sampling: bool = False,
+        return_logits: bool = False,
         return_entropy: bool = False,
         return_logprob: bool = False,
         top_logprobs_num: int = 0,
@@ -528,8 +530,17 @@ class Req:
         # because the decode server does not have the first output token logprobs
         self.send_output_token_logprobs_offset: int = 0
 
+        self.has_probe = has_probe
         self.enable_bin_sampling = enable_bin_sampling
+        self.return_logits = return_logits
         self.return_entropy = return_entropy
+        
+        if return_logits:
+            self.logits = []
+        
+        if has_probe:
+            self.probe_result = []
+        
         if enable_bin_sampling:
             self.bin_sample_id = []
             self.intra_bin_probs = []
@@ -843,8 +854,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     global_num_tokens_for_logprob: Optional[List[int]] = None
     can_run_dp_cuda_graph: bool = False
 
+    # For probe
+    has_probe: bool = False
+    
     # For bin sampling
     enable_bin_sampling: bool = False
+    
+    
+    # For logits
+    return_logits: bool = False
     
     # For entropy
     return_entropy: bool = False
@@ -905,9 +923,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         enable_custom_logit_processor: bool,
         chunked_req: Optional[Req] = None,
     ):
+        has_probe = any(req.has_probe for req in reqs)
         enable_bin_sampling = any(req.enable_bin_sampling for req in reqs)
         return_logprob = any(req.return_logprob for req in reqs)
         return_entropy = any(req.return_entropy for req in reqs)
+        return_logits = any(req.return_logits for req in reqs)
         return cls(
             reqs=reqs,
             req_to_token_pool=req_to_token_pool,
@@ -915,9 +935,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             tree_cache=tree_cache,
             model_config=model_config,
             enable_overlap=enable_overlap,
+            has_probe=has_probe,
             enable_bin_sampling=enable_bin_sampling,
             return_logprob=return_logprob,
             return_entropy=return_entropy,
+            return_logits=return_logits,
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),
             device=req_to_token_pool.device,
@@ -1574,8 +1596,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens_sum = self.seq_lens.sum().item()
         self.output_ids = self.output_ids[keep_indices_device]
         self.enable_bin_sampling = any(req.enable_bin_sampling for req in self.reqs)
+        self.has_probe = any(req.has_probe for req in self.reqs)
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         self.return_entropy = any(req.return_entropy for req in self.reqs)
+        self.return_logits = any(req.return_logits for req in self.reqs)
         if self.return_logprob:
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
             self.token_ids_logprobs = [self.token_ids_logprobs[i] for i in keep_indices]
@@ -1622,8 +1646,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.multimodal_inputs.extend(other.multimodal_inputs)
 
         self.enable_bin_sampling |= other.enable_bin_sampling
+        self.has_probe |= other.has_probe
         self.return_logprob |= other.return_logprob
         self.return_entropy |= other.return_entropy
+        self.return_logits |= other.return_logits
         self.has_stream |= other.has_stream
         self.has_grammar |= other.has_grammar
         self.return_hidden_states |= other.return_hidden_states
@@ -1669,9 +1695,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             seq_lens=self.seq_lens,
             out_cache_loc=self.out_cache_loc,
             seq_lens_sum=self.seq_lens_sum,
+            has_probe=self.has_probe, 
             enable_bin_sampling=self.enable_bin_sampling,
             return_logprob=self.return_logprob,
             return_entropy=self.return_entropy,
+            return_logits=self.return_logits,
             top_logprobs_nums=self.top_logprobs_nums,
             token_ids_logprobs=self.token_ids_logprobs,
             global_num_tokens=self.global_num_tokens,
@@ -1715,8 +1743,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             forward_mode=self.forward_mode,
             out_cache_loc=self.out_cache_loc,
             enable_bin_sampling=self.enable_bin_sampling,
+            has_probe=self.has_probe,
             return_logprob=self.return_logprob,
             return_entropy=self.return_entropy,
+            return_logits=self.return_logits,
             decoding_reqs=self.decoding_reqs,
             spec_algorithm=self.spec_algorithm,
             enable_custom_logit_processor=self.enable_custom_logit_processor,
@@ -1748,8 +1778,14 @@ class ModelWorkerBatch:
     # The sum of all sequence lengths
     seq_lens_sum: int
 
+    # For probe
+    has_probe: bool
+
     # For bin sampling
     enable_bin_sampling: bool
+    
+    # For logits
+    return_logits: bool
     
     # For entropy
     return_entropy: bool

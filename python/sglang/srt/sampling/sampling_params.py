@@ -36,16 +36,44 @@ class SamplingParams:
         top_p: float = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        
+        # ==========
+        # begin of token probe
+        probe_token_id: int = -1,
+        probe_k: int = 10,
+        # ==========
+        # end of token probe
+        
+        # ==========
+        # begin of eager token sampling
+        eager_topk: int = -1,
+        eager_topp: float = 1.0,
+        eager_token_id: int = 0, # avoid invalid indexing
+        # ==========
+        # end of eager token sampling
+        
         # ==========
         # begin of branch search
+        max_parallel_req: int = 4,
         branch_pos: int = 2, 
         branch_k: int = 5,
         max_branch_node_num: int = 10,
-        entropy_first: bool = True,
+        leaf_node_num: int = 1,
+        branch_enable: bool = False,
+        entropy_topk: bool = False,
+        entropy_bin_sample: bool = False,
+        probe_topk: bool = False,
+        probe_bin_sample: bool = False,
         # ==========
         # end of branch search
+        
+        # ==========
+        # begin of bin sampling
         bin_k: int = 5,
         normalized_delta: float = 1.0,
+        # ==========
+        # end of bin sampling
+        
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
         repetition_penalty: float = 1.0,
@@ -72,6 +100,25 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
+        
+        # NOTE: token probe
+        self.probe_token_id = probe_token_id
+        self.probe_k = probe_k
+        
+        self.eager_topk = eager_topk
+        self.eager_topp = eager_topp
+        self.eager_token_id = eager_token_id
+        
+        self.max_parallel_req = max_parallel_req
+        self.branch_pos = branch_pos
+        self.branch_k = branch_k
+        self.max_branch_node_num = max_branch_node_num
+        self.leaf_node_num = leaf_node_num
+        self.branch_enable = branch_enable
+        self.entropy_topk = entropy_topk
+        self.entropy_bin_sample = entropy_bin_sample
+        self.probe_topk = probe_topk
+        self.probe_bin_sample = probe_bin_sample
         
         self.bin_k = bin_k
         self.normalized_delta = normalized_delta

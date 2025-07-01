@@ -165,20 +165,32 @@ from typing import Callable
 # Define GroupRequestManager before TokenizerManager
 
 def default_priority_func(req: TokenizedGenerateReqInput):
-    return 0
+    return -1 if getattr(req.sampling_params, "eager_token_id", -1) != -1 else 0
+
+def entropy_priority_func(req: TokenizedGenerateReqInput, 
+                               entropy: float=0.0, 
+                               should_finish: bool=False):
+    return -100 if should_finish else -entropy
+
+def get_priority_func(req: TokenizedGenerateReqInput):
+    if getattr(req.sampling_params, "entropy_topk", False):
+        return entropy_priority_func
+    elif getattr(req.sampling_params, "entropy_bin_sample", False):
+        return entropy_priority_func
+    else:
+        # return default_priority_func
+        return entropy_priority_func
 
 class GroupRequestManager:
     def __init__(self, 
                  tokenizer_manager: "TokenizerManager", 
                  group_tokenized_obj: GroupTokenizedGenerateReqInput, 
-                 max_subreq_num: int,
-                 max_parallel_requests: int = 16,
+                 max_parallel_requests: int = 4,
                  pritority_func: Callable[[TokenizedGenerateReqInput], int] = default_priority_func,
                  ):
         
         self.tm = tokenizer_manager
         self.group_tokenized_obj = group_tokenized_obj
-        self.max_subreq_num = max_subreq_num
         self.max_parallel_requests = max_parallel_requests
         self.pritority_func = pritority_func
    
@@ -194,63 +206,153 @@ class GroupRequestManager:
     
     def _generate_reqs(self, obj, request):
         if obj.sampling_params.get("n", 1) > 1:
+            assert obj.sampling_params["n"] > 1, "n should be greater than 1"
             src_obj = self.group_tokenized_obj.get_next_request()
             for _ in range(obj.sampling_params["n"]):
-                if self.group_tokenized_obj.exceed_max_subreq_num():
+                if self.group_tokenized_obj.appended_exceed():
                     break
                 new_req = copy.deepcopy(src_obj)
                 new_req.regenerate_id()
+                new_req.sampling_params.n = 1
                 self.group_tokenized_obj.add_new_request(self.pritority_func(new_req), new_req)
-                
-        elif getattr(obj, "branch_enabled", True):                
-            for rid, outlist in self.group_tokenized_obj.rid_to_output.items():
-                if self.group_tokenized_obj.if_branched.get(rid, False):
+        
+        elif getattr(obj, "branch_enable", False): 
+            for rid, outlist in self.group_tokenized_obj.rid_to_output.items(): 
+                if self.group_tokenized_obj.if_branched.get(rid, False): 
                     continue
                 self.group_tokenized_obj.if_branched[rid] = True
                 src_obj = self.group_tokenized_obj.rid_to_req[rid]
-                if getattr(obj, "entropy_first", True):
+                
+                # if outlist["meta_info"]["finish_reason"]["type"] == "stop":
+                #     continue
+                
+                if self.group_tokenized_obj.should_finish():
+                    new_req = copy.deepcopy(src_obj)
+                    new_req.regenerate_id()
+                    new_req.input_ids += outlist["output_ids"]
+                    # new_req.sampling_params.eager_topk = 30
+                    # # new_req.sampling_params.eager_token_id = 522 # "</"
+                    # new_req.sampling_params.eager_token_id = 151645 # "<|im_end|>"
+                    self.group_tokenized_obj.add_new_request(self.pritority_func(new_req, should_finish=True), new_req)
+                    self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((-1, new_req.rid))
+                    continue
+                
+                if obj.sampling_params.get("probe_topk", False):
+                    assert "probe_result" in outlist["meta_info"].keys(), "probe_result is not in the output"
                     assert "output_token_logprobs" in outlist["meta_info"].keys(), "output_token_logprobs is not in the output"
-                    topk_ent_idx = np.argsort(outlist["meta_info"]["entropy"])[:obj.sampling_params["branch_pos"]]
-                    # top 2nd to kth choices
-                    for i in range(obj.sampling_params["branch_pos"]):
-                        new_req = copy.deepcopy(src_obj)
-                        new_req.regenerate_id()
-                        new_req.input_ids += outlist["output_ids"][:topk_ent_idx[i] + 1]
-                        for j in range(1, obj.sampling_params["branch_pos"]):
-                            new_req.input_ids[-1] = outlist["meta_info"]["output_top_logprobs"][topk_ent_idx[i]][j][1] # replace the last token with the top-k choice
-                            self.group_tokenized_obj.add_new_request(self.pritority_func(new_req), new_req)
-                            self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((topk_ent_idx[i], new_req.rid))
-                            
+                    if len(outlist["meta_info"]["probe_result"]) < obj.sampling_params["branch_pos"]:
+                        continue
+                    probe_logits = [item[1].numpy() for item in outlist["meta_info"]["probe_result"]]
                     
+                    topk_probe_idx = np.argsort(probe_logits)[:obj.sampling_params["branch_pos"]]
+                    
+                    # top 2nd to kth choices
+                    for pos in topk_probe_idx.tolist():
+                        for choice in range(1, obj.sampling_params["branch_k"]):
+                            if not self.group_tokenized_obj.appended_exceed():
+                                new_req = copy.deepcopy(src_obj)
+                                new_req.regenerate_id()
+                                new_req.input_ids += outlist["output_ids"][:pos]
+                                new_req.input_ids += [outlist["meta_info"]["output_top_logprobs"][pos][choice][1]] # replace the last token with the top-k choice
+                                self.group_tokenized_obj.add_new_request(self.pritority_func(new_req, probe_logits[pos]), new_req)
+                                self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((pos, new_req.rid))
+                
+                elif obj.sampling_params.get("probe_bin_sample", False):
+                    assert "probe_result" in outlist["meta_info"].keys(), "probe_result is not in the output"
+                    assert "bin_token_logprobs" in outlist["meta_info"].keys(), "bin_token_logprobs is not in the output"
+                    if len(outlist["meta_info"]["probe_result"]) < obj.sampling_params["branch_pos"]:
+                        continue
+                    
+                    probe_logits = [item[1].numpy() for item in outlist["meta_info"]["probe_result"]]
+                    
+                    topk_probe_idx = np.argsort(probe_logits)[:obj.sampling_params["branch_pos"]]
+                    
+                    # top 2nd to kth choices
+                    for pos in topk_probe_idx.tolist():
+                        for choice in range(1, obj.sampling_params["branch_k"]):
+                            if not self.group_tokenized_obj.appended_exceed():
+                                new_req = copy.deepcopy(src_obj)
+                                new_req.regenerate_id()
+                                new_req.input_ids += outlist["output_ids"][:pos]
+                                new_req.input_ids += [outlist["meta_info"]["bin_token_logprobs"][pos][choice][1]] # replace the last token with the top-k choice
+                                self.group_tokenized_obj.add_new_request(self.pritority_func(new_req, probe_logits[pos]), new_req)
+                                self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((pos, new_req.rid))
+                
+                elif obj.sampling_params.get("entropy_topk", False):
+                    assert "entropy" in outlist["meta_info"].keys(), "entropy is not in the output"
+                    assert "output_token_logprobs" in outlist["meta_info"].keys(), "output_token_logprobs is not in the output"
+                    if len(outlist["meta_info"]["entropy"]) < obj.sampling_params["branch_pos"]:
+                        continue
+                    topk_ent_idx = np.argsort(outlist["meta_info"]["entropy"])[:obj.sampling_params["branch_pos"]]
+                    
+                    # top 2nd to kth choices
+                    for pos in topk_ent_idx.tolist():
+                        for choice in range(1, obj.sampling_params["branch_k"]):
+                            if not self.group_tokenized_obj.appended_exceed():
+                                new_req = copy.deepcopy(src_obj)
+                                new_req.regenerate_id()
+                                new_req.input_ids += outlist["output_ids"][:pos]
+                                new_req.input_ids += [outlist["meta_info"]["output_top_logprobs"][pos][choice][1]] # replace the last token with the top-k choice
+                                self.group_tokenized_obj.add_new_request(self.pritority_func(new_req, outlist["meta_info"]["entropy"][pos]), new_req)
+                                self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((pos, new_req.rid))
+                
+                elif obj.sampling_params.get("entropy_bin_sample", False): 
+                    # print(outlist["meta_info"].keys())
+                    assert "entropy" in outlist["meta_info"].keys(), "entropy is not in the output"
+                    assert "bin_token_logprobs" in outlist["meta_info"].keys(), "bin_token_logprobs is not in the output"
+                    if len(outlist["meta_info"]["entropy"]) < obj.sampling_params["branch_pos"]:
+                        continue
+                    topk_ent_idx = np.argsort(outlist["meta_info"]["entropy"])[:obj.sampling_params["branch_pos"]]
+                    
+                    # top 2nd to kth choices
+                    for pos in topk_ent_idx.tolist():
+                        for choice in range(1, obj.sampling_params["branch_k"]):
+                            if not self.group_tokenized_obj.appended_exceed():
+                                new_req = copy.deepcopy(src_obj)
+                                new_req.regenerate_id()
+                                new_req.input_ids += outlist["output_ids"][:pos]
+                                new_req.input_ids += [outlist["meta_info"]["bin_token_logprobs"][pos][choice][1]] # replace the last token with the top-k choice
+                                self.group_tokenized_obj.add_new_request(self.pritority_func(new_req, outlist["meta_info"]["entropy"][pos]), new_req)
+                                self.group_tokenized_obj.rid_to_output[rid]["meta_info"]["children"].append((pos, new_req.rid))
+                else:
+                    assert False, "Not supporting group request expect entropy_topk = True"
+                            
         else:
-            assert False, "Not supporting group request expect parallel_sample_num > 1 or branch_enabled = True"
+            assert False, "Not supporting group request expect parallel_sample_num > 1 or branch_enable = True"
         
     async def _handle_single_request(self, 
                                      obj: GenerateReqInput,
                                      request: Optional[fastapi.Request] = None,
                                     ):
         self._generate_reqs(obj, request)
-        while not self.group_tokenized_obj.is_empty():
+        # while not self.group_tokenized_obj.is_empty():
+        while True:
+            # print(self.group_tokenized_obj.sent_subreq_num)
+            # print(self.group_tokenized_obj.appended_subreq_num)
+            # print("=" * 100)
             generators = []
             for _ in range(self.max_parallel_requests):
                 new_req = self._get_next_request()
                 if new_req is None:
                     break
-                created_time = time.time()
-                if self.group_tokenized_obj.exceed_max_subreq_num():
+                if self.group_tokenized_obj.sent_exceed():                    
                     yield list(self.group_tokenized_obj.rid_to_output.values())
-                else:
-                    self.tm._send_one_request(obj, new_req, created_time)
-                    self.group_tokenized_obj.sent_subreq_num += 1
-                    generators.append(self.tm._wait_one_response(obj, new_req, request))
+                created_time = time.time()
+                self.tm._send_one_request(obj, new_req, created_time)
+                self.group_tokenized_obj.sent_subreq_num += 1
+                generators.append(self.tm._wait_one_response(obj, new_req, request))
             out = await asyncio.gather(*(gen.__anext__() for gen in generators))
+
             # out: List[Dict[str, Any]] where each item is acquired from TokenizerManager.state.out_list
             for o in out:
+                if o["meta_info"]["finish_reason"]["type"] == "stop":
+                    self.group_tokenized_obj.finished_subreq_num += 1
                 self.group_tokenized_obj.add_new_output(o["meta_info"]["id"], o)
 
             self._generate_reqs(obj, request)
+        
+        
             
-
     async def _handle_batch_request(self, 
                                     obj: GenerateReqInput,
                                     request: Optional[fastapi.Request] = None,
@@ -538,13 +640,17 @@ class TokenizerManager:
     async def _handle_single_request_group(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
+        tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput] = None,
         request: Optional[fastapi.Request] = None,
         created_time: Optional[float] = None,
     ):
-        tokenized_obj = await self._tokenize_one_request(obj)
-        group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, obj.max_subreq_num)
-        group_req_manager = GroupRequestManager(self, group_tokenized_obj, obj.max_subreq_num)
-        async for response in group_req_manager._handle_single_request(obj, request):
+        if tokenized_obj is None:
+            tokenized_obj = await self._tokenize_one_request(obj)
+        priority_func = get_priority_func(tokenized_obj)
+        group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj)
+        group_req_manager = GroupRequestManager(self, group_tokenized_obj, max_parallel_requests=obj.sampling_params.get("max_parallel_req", 4), pritority_func=priority_func)
+        async for response in group_req_manager._handle_single_request(obj=obj, 
+                                                                       request=request):
             yield response
     
     async def _handle_batch_request_group(
@@ -565,21 +671,18 @@ class TokenizerManager:
 
             for i, tokenized_obj in enumerate(tokenized_objs):
                 tmp_obj = obj[i]
-                group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, tmp_obj.max_subreq_num)
-                group_req_manager = GroupRequestManager(self, group_tokenized_obj, tmp_obj.max_subreq_num)
-                generators.append(group_req_manager._handle_single_request(tmp_obj, request))
+                generators.append(self._handle_single_request_group(obj=tmp_obj, 
+                                                                    tokenized_obj=tokenized_obj,
+                                                                    request=request))
                 rids.append(tmp_obj.rid)
 
         else:
             # Sequential tokenization and processing
             for i in range(batch_size):
                 tmp_obj = obj[i]
-                tokenized_obj = await self._tokenize_one_request(tmp_obj)
-                group_tokenized_obj = GroupTokenizedGenerateReqInput.from_single_request(tokenized_obj, tmp_obj.max_subreq_num)
-                group_req_manager = GroupRequestManager(self, group_tokenized_obj, tmp_obj.max_subreq_num)
-                generators.append(group_req_manager._handle_single_request(tmp_obj, request))
+                generators.append(self._handle_single_request_group(obj=tmp_obj, 
+                                                                    request=request))
                 rids.append(tmp_obj.rid)
-        
         # Wait for all requests
         is_stream = hasattr(obj, "stream") and obj.stream
         if not is_stream:
@@ -632,10 +735,14 @@ class TokenizerManager:
             is_group = obj.branch_enable or obj.parallel_sample_num > 1
             if is_group:
                 if is_single:
-                    async for response in self._handle_single_request_group(obj, request, created_time):
+                    async for response in self._handle_single_request_group(obj=obj, 
+                                                                            request=request, 
+                                                                            created_time=created_time):
                         yield response
                 else:
-                    async for response in self._handle_batch_request_group(obj, request, created_time):
+                    async for response in self._handle_batch_request_group(obj=obj, 
+                                                                            request=request, 
+                                                                            created_time=created_time):
                         yield response
             else:
                 if is_single:
@@ -733,8 +840,10 @@ class TokenizerManager:
         """Create a tokenized request object from common parameters."""
 
         if self.is_generation:
+            return_logits = obj.return_logits
             return_logprob = obj.return_logprob
             return_entropy = obj.return_entropy
+            has_probe = obj.has_probe
             enable_bin_sampling = obj.enable_bin_sampling
             logprob_start_len = obj.logprob_start_len
             top_logprobs_num = obj.top_logprobs_num
@@ -770,6 +879,8 @@ class TokenizerManager:
                 input_ids=input_ids,
                 mm_inputs=image_inputs,
                 sampling_params=sampling_params,
+                has_probe=has_probe,
+                return_logits=return_logits,
                 return_logprob=return_logprob,
                 return_entropy=return_entropy,
                 enable_bin_sampling=enable_bin_sampling,
@@ -874,7 +985,6 @@ class TokenizerManager:
                         f"Request is disconnected from the client side (type 1). Abort request {rid=}"
                     )
                 continue
-            
             out = state.out_list[-1]
 
             state.out_list = []
@@ -1371,6 +1481,12 @@ class TokenizerManager:
                     i,
                 )
             
+            if getattr(state.obj, "return_logits", False):
+                meta_info["logits"] = recv_obj.logits[i]
+            
+            if getattr(state.obj, "has_probe", False):
+                meta_info["probe_result"] = recv_obj.probe_result[i]
+                
             if getattr(state.obj, "branch_enable", False):
                 meta_info["children"] = []
                 
@@ -1388,7 +1504,7 @@ class TokenizerManager:
                     and not self.server_args.skip_tokenizer_init,
                     recv_obj,
                     i,
-                )
+                )   
 
             if not isinstance(recv_obj, BatchEmbeddingOut):
                 meta_info.update(

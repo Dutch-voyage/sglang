@@ -23,12 +23,24 @@ class SamplingBatchInfo:
     top_ps: torch.Tensor
     top_ks: torch.Tensor
     min_ps: torch.Tensor
+    
+    # NOTE: token probe
+    probe_token_ids: torch.Tensor
+    probe_ks: torch.Tensor
+    
+    # NOTE: eager token sampling
+    eager_topks: torch.Tensor
+    eager_topps: torch.Tensor
+    eager_token_ids: torch.Tensor
 
     # Whether all requests use greedy sampling
     is_all_greedy: bool
 
     # Whether any request needs min_p sampling
     need_min_p_sampling: bool
+    
+    # Whether any request needs eager token sampling
+    need_eager_token_sampling: torch.Tensor
 
     # Masking tensors for grammar-guided structured outputs
     vocab_size: int
@@ -79,6 +91,28 @@ class SamplingBatchInfo:
         ).to(device, non_blocking=True)
         min_ps = torch.tensor(
             [r.sampling_params.min_p for r in reqs], dtype=torch.float
+        ).to(device, non_blocking=True)
+        
+        # NOTE: token probe
+        probe_token_ids = torch.tensor(
+            [r.sampling_params.probe_token_id for r in reqs], dtype=torch.int64
+        ).to(device, non_blocking=True)
+        probe_ks = torch.tensor(
+            [r.sampling_params.probe_k for r in reqs], dtype=torch.int64
+        ).to(device, non_blocking=True)
+        
+        # NOTE: eager token sampling
+        eager_topks = torch.tensor(
+            [r.sampling_params.eager_topk for r in reqs], dtype=torch.int32
+        ).to(device, non_blocking=True)
+        eager_topps = torch.tensor(
+            [r.sampling_params.eager_topp for r in reqs], dtype=torch.float
+        ).to(device, non_blocking=True)
+        eager_token_ids = torch.tensor(
+            [r.sampling_params.eager_token_id for r in reqs], dtype=torch.int64
+        ).to(device, non_blocking=True)
+        need_eager_token_sampling = torch.tensor(
+            [r.sampling_params.eager_token_id != 0 for r in reqs], dtype=torch.bool
         ).to(device, non_blocking=True)
         
         # NOTE: added for bin sampling
@@ -138,16 +172,21 @@ class SamplingBatchInfo:
                 penaltylib.BatchedPresencePenalizer,
             },
         )
-
         ret = cls(
             temperatures=temperatures,
             top_ps=top_ps,
             top_ks=top_ks,
             min_ps=min_ps,
+            eager_topks=eager_topks,
+            eager_topps=eager_topps,
+            eager_token_ids=eager_token_ids,
+            probe_token_ids=probe_token_ids,
+            probe_ks=probe_ks,
             bin_ks=bin_ks,
             normalized_deltas=normalized_deltas,
             is_all_greedy=all(r.sampling_params.top_k <= 1 for r in reqs),
             need_min_p_sampling=any(r.sampling_params.min_p > 0 for r in reqs),
+            need_eager_token_sampling=need_eager_token_sampling,
             vocab_size=vocab_size,
             penalizer_orchestrator=penalizer_orchestrator,
             has_custom_logit_processor=has_custom_logit_processor,
@@ -221,6 +260,12 @@ class SamplingBatchInfo:
             "top_ps",
             "top_ks",
             "min_ps",
+            "eager_topks",
+            "eager_topps",
+            "eager_token_ids",
+            "probe_token_ids",
+            "probe_ks",
+            "need_eager_token_sampling",
             "bin_ks",
             "normalized_deltas",
         ]:
@@ -318,6 +363,12 @@ class SamplingBatchInfo:
             "top_ps",
             "top_ks",
             "min_ps",
+            "eager_topks",
+            "eager_topps",
+            "eager_token_ids",
+            "probe_token_ids",
+            "probe_ks",
+            "need_eager_token_sampling",
             "bin_ks",
             "normalized_deltas",
         ]:

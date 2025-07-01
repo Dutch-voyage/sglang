@@ -42,10 +42,11 @@ class Sampler(nn.Module):
         self,
         logits_output: LogitsProcessorOutput,
         sampling_info: SamplingBatchInfo,
-        enable_soft_thinking: bool,
+        has_probe: bool, 
         enable_bin_sampling: bool,
         return_logprob: bool,
         return_entropy: bool,
+        return_logits: bool,
         top_logprobs_nums: List[int],
         token_ids_logprobs: List[List[int]],
     ):
@@ -62,7 +63,8 @@ class Sampler(nn.Module):
                 performs sampling in draft workers.
         """
         logits = logits_output.next_token_logits
-
+        # probe_result = [id, logits, probs, rank]
+        
         # Apply the custom logit processors if registered in the sampling info.
         if sampling_info.has_custom_logit_processor:
             self._apply_custom_logit_processor(logits, sampling_info)
@@ -75,16 +77,28 @@ class Sampler(nn.Module):
             if crash_on_warnings():
                 raise ValueError("Detected errors during sampling! NaN in the logits.")
             
-        if enable_bin_sampling:
+        if enable_bin_sampling:                
             (
                 logits_output.bin_sample_id,
                 logits_output.intra_bin_probs,
-            ) = get_bin_logprobs(logits, sampling_info.bin_ks, sampling_info.normalized_deltas)
+            ) = get_bin_logprobs(logits, 
+                                 sampling_info.bin_ks, 
+                                 sampling_info.normalized_deltas, 
+                                 sampling_info.need_eager_token_sampling, 
+                                 sampling_info.eager_token_ids)
         
 
         if sampling_info.is_all_greedy:
             # Use torch.argmax if all requests use greedy sampling
             batch_next_token_ids = torch.argmax(logits, -1)
+            if return_logits:
+                logits_output.next_token_logits = torch.gather(logits, 1, batch_next_token_ids.to(torch.int64).unsqueeze(1)).squeeze(1)
+            
+            if has_probe:
+                logits_output.probe_result = [sampling_info.probe_token_ids, torch.gather(logits, 1, sampling_info.probe_token_ids.unsqueeze(1)).squeeze(1)]
+                probe_probs = torch.gather(probs, 1, sampling_info.probe_token_ids.unsqueeze(1)).squeeze(1)
+                logits_output.probe_result += [probe_probs]
+            
             if return_logprob:
                 logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
             
@@ -92,17 +106,26 @@ class Sampler(nn.Module):
                 probs = torch.softmax(logits, dim=-1)
                 logits_output.entropy = _entropy(probs)
                 logits_output.varentropy = _varentropy(probs)
-            
+                
+            if torch.any(sampling_info.need_eager_token_sampling):
+                probs = torch.softmax(logits, dim=-1) if not return_entropy else probs
+                check_nan = self.use_nan_detection and crash_on_warnings()
+                normed_probs = top_k_renorm_prob(probs, sampling_info.eager_topks)
+                normed_probs = top_p_renorm_prob(normed_probs, sampling_info.eager_topps)
+                # normed_probs: [B, V]
+                # sampling_info.eager_token_ids: [B]
+                cond = (torch.gather(normed_probs, 1, sampling_info.eager_token_ids.unsqueeze(1)).squeeze(1) > 0)  * (sampling_info.need_eager_token_sampling)
+                batch_next_token_ids = torch.where(
+                    cond,
+                    sampling_info.eager_token_ids,
+                    batch_next_token_ids,
+                    )
+                                
         else:
             # Post process logits
             logits.div_(sampling_info.temperatures)
-            logits[:] = torch.softmax(logits, dim=-1)
-            probs = logits
-            del logits
-            
-            if return_entropy:
-                logits_output.entropy = _entropy(probs)
-                logits_output.varentropy = _varentropy(probs)
+            probs = torch.softmax(logits, dim=-1)
+            # probs = logits
 
             if global_server_args_dict["sampling_backend"] == "flashinfer":
                 if return_logprob:
@@ -118,10 +141,10 @@ class Sampler(nn.Module):
                 max_top_k_round, batch_size = 32, probs.shape[0]
                                 
                 if sampling_info.need_min_p_sampling:
-                    probs = top_k_renorm_prob(probs, sampling_info.top_ks)
-                    probs = top_p_renorm_prob(probs, sampling_info.top_ps)
+                    normed_probs = top_k_renorm_prob(probs, sampling_info.top_ks)
+                    normed_probs = top_p_renorm_prob(normed_probs, sampling_info.top_ps)
                     batch_next_token_ids = min_p_sampling_from_probs(
-                        probs, sampling_info.min_ps
+                        normed_probs, sampling_info.min_ps
                     )
                 else:
                     # Check Nan will throw exception, only check when crash_on_warnings is True
@@ -133,8 +156,23 @@ class Sampler(nn.Module):
                         filter_apply_order="joint",
                         check_nan=check_nan,
                     )
+                
+                if torch.any(sampling_info.need_eager_token_sampling):  
+                    check_nan = self.use_nan_detection and crash_on_warnings()
+                    normed_probs = top_k_renorm_prob(probs, sampling_info.eager_topks)
+                    normed_probs = top_p_renorm_prob(normed_probs, sampling_info.eager_topps)
+                    # normed_probs: [B, V]
+                    # sampling_info.eager_token_ids: [B]
 
+                    cond = (torch.gather(normed_probs, 1, sampling_info.eager_token_ids.unsqueeze(1)).squeeze(1) > 0)  * (sampling_info.need_eager_token_sampling)
+                    batch_next_token_ids = torch.where(
+                        cond,
+                        sampling_info.eager_token_ids,
+                        batch_next_token_ids,
+                    )   
+        
             elif global_server_args_dict["sampling_backend"] == "pytorch":
+                assert False, "pytorch sampling backend is not supported in this version"
                 # A slower fallback implementation with torch native operations.
                 batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_torch(
                     probs,
@@ -153,7 +191,38 @@ class Sampler(nn.Module):
                 raise ValueError(
                     f"Invalid sampling backend: {global_server_args_dict['sampling_backend']}"
                 )
-        
+            
+            if return_entropy:
+                logits_output.entropy = _entropy(probs)
+                logits_output.varentropy = _varentropy(probs)
+
+            if return_logits:
+                    logits_output.next_token_logits = torch.gather(logits, 1, batch_next_token_ids.to(torch.int64).unsqueeze(1)).squeeze(1)
+
+            if has_probe:
+                logits_output.probe_result = [sampling_info.probe_token_ids, torch.gather(logits, 1, sampling_info.probe_token_ids.unsqueeze(1)).squeeze(1)]
+                probe_probs = torch.gather(probs, 1, sampling_info.probe_token_ids.unsqueeze(1)).squeeze(1)
+                logits_output.probe_result += [probe_probs]
+                
+                # for triton implementation
+                # ranks = (probs.unsqueeze(1) > probe_probs.unsqueeze(2)).sum(dim=-1)
+                # logits_output.probe_result += [ranks]
+                
+                max_k = torch.max(sampling_info.probe_ks)
+                
+                # 1. Compute topk for the entire batch with the largest k
+                top_probs_padded, _ = torch.topk(probs, max_k, dim=1)
+                
+                # 2. Create a mask to select the top 'k' elements for each row
+                mask = torch.arange(max_k, device=probe_probs.device)[None, :] < sampling_info.probe_ks[:, None]
+
+                # 3. Apply the mask. We use a value like -inf for values and -1 for 
+                #    indices to indicate padding.
+                top_probs = torch.where(mask, top_probs_padded, torch.tensor(float('-inf')))
+
+                logits_output.probe_result += [torch.searchsorted(top_probs.flip(dims=(-1,)), probe_probs.unsqueeze(-1))]  
+            
+            del logits
         
         
         # Attach logprobs to logits_output (in-place modification)
@@ -291,7 +360,11 @@ def get_token_ids_logprobs(logprobs: torch.Tensor, token_ids_logprobs: List[List
 
     return output_token_ids_logprobs_val, output_token_ids_logprobs_idx
 
-def get_bin_logprobs(logits: torch.Tensor, ks: torch.Tensor, normalized_deltas: torch.Tensor):
+def get_bin_logprobs(logits: torch.Tensor, 
+                     ks: torch.Tensor, 
+                     normalized_deltas: torch.Tensor, 
+                     need_eager_token_sampling: torch.Tensor, 
+                     eager_token_ids: torch.Tensor):
     """
         k: logits[0] - logits[k - 1] determines the size of the first bin, which is the same for all bins.
         normalized_delta: the normalized delta between bins.
@@ -302,5 +375,9 @@ def get_bin_logprobs(logits: torch.Tensor, ks: torch.Tensor, normalized_deltas: 
         
         so the log probability of the orignal bin-wise sampling will be compressed by a factor of delta / normalized_delta.
     """
-    bin_sample_id, intra_bin_probs = _get_bin_logprobs_torch(logits, ks, normalized_deltas)
+    bin_sample_id, intra_bin_probs, _, _ = _get_bin_logprobs_torch(logits, 
+                                                                  ks, 
+                                                                  normalized_deltas, 
+                                                                  need_eager_token_sampling, 
+                                                                  eager_token_ids)
     return bin_sample_id, intra_bin_probs
